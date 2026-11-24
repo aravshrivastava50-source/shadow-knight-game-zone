@@ -39,8 +39,8 @@ export const Navbar: React.FC<NavbarProps> = ({
           aria-label="Primary navigation"
           className="hidden lg:flex items-center gap-5 text-sm font-medium text-slate-300 shrink-0"
         >
-          <a href="#spotlight" className="hover:text-white transition-colors whitespace-nowrap">
-            Spotlight
+          <a href="#portal-banner" className="hover:text-white transition-colors whitespace-nowrap">
+            Home
           </a>
           <button
             type="button"

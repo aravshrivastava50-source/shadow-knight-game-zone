@@ -4,15 +4,14 @@ import { BrandedLoader } from './components/BrandedLoader';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { GameGrid } from './components/GameGrid';
 import { GameStageModal } from './components/GameStageModal';
-import { HeroSpotlight } from './components/HeroSpotlight';
 import { LeaderboardModal } from './components/LeaderboardModal';
 import { Navbar } from './components/Navbar';
 import { OfflineBanner } from './components/OfflineBanner';
+import { PortalWelcomeBanner } from './components/PortalWelcomeBanner';
 import { SupportContactModal } from './components/SupportContactModal';
 import { buildSupportWhatsAppUrl } from './config/contact';
 import {
   GAMES_REGISTRY,
-  getFeaturedHeroGame,
   getPlayableStarterGame,
 } from './games/gamesRegistry';
 import {
@@ -23,6 +22,7 @@ import {
   subscribeToPublishedGames,
 } from './services/cloudCatalog';
 import type {
+  GameCategory,
   GameMetadata,
   GameSessionResult,
   LeaderboardEntry,
@@ -47,6 +47,8 @@ function PortalShell() {
   const [remoteSettings, setRemoteSettings] = useState<PortalRemoteSettings>(() =>
     loadCachedPortalSettings()
   );
+  const [activeCategory, setActiveCategory] = useState<GameCategory>('All Games');
+  const [searchQuery, setSearchQuery] = useState('');
   const [activeGame, setActiveGame] = useState<GameMetadata | null>(null);
   const [leaderboardOpen, setLeaderboardOpen] = useState(false);
   const [supportOpen, setSupportOpen] = useState(false);
@@ -116,6 +118,11 @@ function PortalShell() {
     document.getElementById('games-catalog')?.scrollIntoView({ behavior: 'smooth' });
   }, []);
 
+  const handleResetFilters = useCallback(() => {
+    setActiveCategory('All Games');
+    setSearchQuery('');
+  }, []);
+
   if (!domainCheck.authorized) {
     return (
       <div className="min-h-screen bg-[#07070F] text-slate-100 flex items-center justify-center p-6">
@@ -173,7 +180,6 @@ function PortalShell() {
     );
   }
 
-  const heroGame = getFeaturedHeroGame();
   const starterGame = getPlayableStarterGame();
   const playableCount = mergedCatalog.filter((g) => g.status === 'playable').length;
 
@@ -189,19 +195,23 @@ function PortalShell() {
       />
 
       <main className="flex-1">
-        <HeroSpotlight
-          heroGame={heroGame}
-          starterGame={starterGame}
+        <PortalWelcomeBanner
           totalGamesCount={mergedCatalog.length}
           playableCount={playableCount}
           profile={profile}
           remoteSettings={remoteSettings}
-          onLaunchGame={(game) => setActiveGame(game)}
+          activeCategory={activeCategory}
+          searchQuery={searchQuery}
+          onSelectCategory={setActiveCategory}
+          onSearchChange={setSearchQuery}
         />
 
         <GameGrid
           games={mergedCatalog}
           profile={profile}
+          activeCategory={activeCategory}
+          searchQuery={searchQuery}
+          onResetFilters={handleResetFilters}
           onSelectGame={(game) => setActiveGame(game)}
         />
 

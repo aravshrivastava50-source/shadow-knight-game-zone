@@ -1,28 +1,26 @@
 import React, { useMemo, useState } from 'react';
-import { Gamepad2, Play, Search, ShieldCheck, Star, Trophy, Users, X } from 'lucide-react';
+import { Gamepad2, Play, ShieldCheck, Star, Trophy, Users } from 'lucide-react';
 import { sanitizeHttpsUrl } from '../services/cloudCatalog';
 import type { GameCategory, GameMetadata, PlayerProfile } from '../types';
 import { GameArtwork } from './GameArtwork';
 
-const CATEGORIES: GameCategory[] = [
-  'All Games',
-  'Community & Creator Games',
-  '3D Action',
-  'Racing & Drift',
-  'Arcade & Reflex',
-  '2-Player',
-  'Coming Soon',
-];
-
 interface GameGridProps {
   games: GameMetadata[];
   profile: PlayerProfile;
+  activeCategory: GameCategory;
+  searchQuery: string;
+  onResetFilters: () => void;
   onSelectGame: (game: GameMetadata) => void;
 }
 
-export const GameGrid: React.FC<GameGridProps> = ({ games, profile, onSelectGame }) => {
-  const [activeCategory, setActiveCategory] = useState<GameCategory>('All Games');
-  const [searchQuery, setSearchQuery] = useState('');
+export const GameGrid: React.FC<GameGridProps> = ({
+  games,
+  profile,
+  activeCategory,
+  searchQuery,
+  onResetFilters,
+  onSelectGame,
+}) => {
   const [brokenThumbIds, setBrokenThumbIds] = useState<Record<string, boolean>>({});
 
   const filteredGames = useMemo(() => {
@@ -50,73 +48,34 @@ export const GameGrid: React.FC<GameGridProps> = ({ games, profile, onSelectGame
     });
   }, [activeCategory, games, searchQuery]);
 
-  return (
-    <section id="games-catalog" className="mx-auto max-w-7xl px-4 sm:px-6 pt-2 pb-8">
-      {/* Toolbar: Category Filter Tabs + Instant Search */}
-      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3.5 pb-4 border-b border-white/10">
-        <div
-          role="tablist"
-          aria-label="Game categories"
-          className="flex items-center gap-1.5 overflow-x-auto pb-1 lg:pb-0 no-scrollbar"
-        >
-          {CATEGORIES.map((category) => {
-            const isActive = activeCategory === category;
-            return (
-              <button
-                key={category}
-                role="tab"
-                aria-selected={isActive}
-                type="button"
-                onClick={() => setActiveCategory(category)}
-                className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-medium whitespace-nowrap shrink-0 transition cursor-pointer ${
-                  isActive
-                    ? 'bg-[#FF1E42] text-white shadow-sm shadow-[#FF1E42]/30'
-                    : 'bg-[#120B24] text-slate-300 border border-white/10 hover:text-white hover:border-white/25'
-                }`}
-              >
-                {category}
-              </button>
-            );
-          })}
-        </div>
+  const isFiltered = activeCategory !== 'All Games' || searchQuery.trim().length > 0;
 
-        {/* Instant Search Input */}
-        <div className="relative w-full lg:w-72 shrink-0">
-          <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <input
-            type="search"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search games or genres..."
-            aria-label="Search games"
-            className="w-full min-h-[40px] rounded-xl bg-[#120B24] border border-white/12 pl-10 pr-9 py-1.5 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-[#00F0FF] transition"
-          />
-          {searchQuery && (
+  return (
+    <section id="games-catalog" className="mx-auto max-w-7xl px-4 sm:px-6 pt-1 pb-8">
+      {/* Results Header */}
+      <div className="flex items-baseline justify-between gap-4">
+        <h2 className="font-display text-base sm:text-lg font-bold text-white">
+          {activeCategory === 'All Games' ? 'All Games & Arcade Library' : activeCategory}
+        </h2>
+        <div className="flex items-center gap-3">
+          {isFiltered && (
             <button
               type="button"
-              onClick={() => setSearchQuery('')}
-              aria-label="Clear search"
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-white cursor-pointer"
+              onClick={onResetFilters}
+              className="text-xs font-medium text-[#00F0FF] hover:underline cursor-pointer"
             >
-              <X className="w-4 h-4" />
+              Reset
             </button>
           )}
+          <span className="text-xs text-slate-400 font-mono-nums">
+            {filteredGames.length} {filteredGames.length === 1 ? 'title' : 'titles'}
+          </span>
         </div>
-      </div>
-
-      {/* Results Header */}
-      <div className="mt-4 flex items-baseline justify-between gap-4">
-        <h2 className="font-display text-lg sm:text-xl font-bold text-white">
-          {activeCategory === 'All Games' ? 'Featured Arcade & 3D Library' : activeCategory}
-        </h2>
-        <span className="text-xs text-slate-400 font-mono-nums">
-          {filteredGames.length} {filteredGames.length === 1 ? 'title' : 'titles'}
-        </span>
       </div>
 
       {/* Multi-Game Showcase Grid */}
       {filteredGames.length === 0 ? (
-        <div className="mt-6 rounded-2xl bg-[#120B24]/70 border border-white/10 p-10 text-center">
+        <div className="mt-4 rounded-2xl bg-[#120B24]/70 border border-white/10 p-10 text-center">
           <Gamepad2 className="w-10 h-10 text-slate-500 mx-auto" />
           <h3 className="mt-3 font-display text-base font-bold text-white">No matching games</h3>
           <p className="mt-1 text-sm text-slate-400">
@@ -124,17 +83,14 @@ export const GameGrid: React.FC<GameGridProps> = ({ games, profile, onSelectGame
           </p>
           <button
             type="button"
-            onClick={() => {
-              setActiveCategory('All Games');
-              setSearchQuery('');
-            }}
-            className="mt-4 min-h-[40px] rounded-lg bg-[#00F0FF] text-[#07070F] px-4 py-2 text-xs font-bold hover:brightness-110 transition cursor-pointer"
+            onClick={onResetFilters}
+            className="mt-4 min-h-[42px] rounded-lg bg-[#00F0FF] text-[#07070F] px-4 py-2 text-xs font-bold hover:brightness-110 transition cursor-pointer"
           >
             Reset Filters
           </button>
         </div>
       ) : (
-        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+        <div className="mt-3.5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
           {filteredGames.map((game) => {
             const best = profile.highScores[game.id] ?? 0;
             const isPlayable = game.status === 'playable';
@@ -164,6 +120,7 @@ export const GameGrid: React.FC<GameGridProps> = ({ games, profile, onSelectGame
                       src={safeThumbUrl}
                       alt={game.title}
                       loading="lazy"
+                      referrerPolicy="no-referrer"
                       onError={() =>
                         setBrokenThumbIds((prev) => ({ ...prev, [game.id]: true }))
                       }
@@ -246,7 +203,7 @@ export const GameGrid: React.FC<GameGridProps> = ({ games, profile, onSelectGame
                     <button
                       type="button"
                       onClick={() => onSelectGame(game)}
-                      className={`min-h-[40px] inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-bold transition whitespace-nowrap shrink-0 cursor-pointer ${
+                      className={`min-h-[42px] inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-bold transition whitespace-nowrap shrink-0 cursor-pointer ${
                         isPlayable
                           ? 'bg-[#FF1E42] hover:bg-[#ff3355] text-white shadow-sm shadow-[#FF1E42]/35'
                           : 'bg-white/8 hover:bg-white/15 text-[#00F0FF] border border-[#00F0FF]/35'

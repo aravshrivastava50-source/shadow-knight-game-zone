@@ -11,12 +11,11 @@ export const GAMES_REGISTRY: GameMetadata[] = [
   {
     id: 'chrono-slayer-3d',
     title: 'Chrono Slayer 3D',
-    subtitle: 'Flagship 3D Cyber-Blade Action',
+    subtitle: '3D Cyber-Blade Arena Action',
     description:
       'Wield a dual-energy crimson & cyan greatsword in a 3D rune arena. Chain 3-hit combos, draft Roguelike power-ups, and defeat the Wave 5 Void Titan Boss.',
     category: '3D Action',
     status: 'playable',
-    isFeaturedHero: true,
     orientation: '16:9 Landscape',
     players: '1 Player',
     controlsSummary: 'Virtual Joystick + Attack/Dash/Nova · WASD + Space',
@@ -119,10 +118,6 @@ export const GAMES_REGISTRY: GameMetadata[] = [
     xpRewardMultiplier: 1.4,
   },
 ];
-
-export function getFeaturedHeroGame(): GameMetadata {
-  return GAMES_REGISTRY.find((g) => g.isFeaturedHero) ?? GAMES_REGISTRY[0];
-}
 
 export function getPlayableStarterGame(): GameMetadata {
   return (
