@@ -19,6 +19,7 @@ export default defineConfig(() => {
           'icon.svg',
           'robots.txt',
           'sitemap.xml',
+          'google7a92a2ff6e65d7da.html',
         ],
         manifest: {
           id: '/',
@@ -57,6 +58,7 @@ export default defineConfig(() => {
         workbox: {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,webp,woff,woff2}'],
+          navigateFallbackDenylist: [/^\/google[a-z0-9]+\.html$/i],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
