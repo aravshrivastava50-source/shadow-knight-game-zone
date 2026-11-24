@@ -1,0 +1,212 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net (Default-Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Hardened Primitives
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 2 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSafeAssetUrl(url) {
+      return url is string
+        && url.size() >= 5
+        && url.size() <= 1024
+        && (
+          url.matches('^https://[^\\s]+$')
+          || url.matches('^gs://[^\\s]+$')
+          || url.matches('^[a-zA-Z0-9_\\-./]+$')
+        );
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        || request.auth.token.email == 'aravshrivastava50@gmail.com'
+      );
+    }
+
+    // Validation Blueprint: PublishedGame
+    function isValidPublishedGame(data) {
+      return data.keys().hasAll([
+          'id',
+          'title',
+          'creatorStudio',
+          'category',
+          'thumbnailUrl',
+          'gameBundleUrl',
+          'isLandscapeOnly',
+          'legalRightsVerified',
+          'ownerUid',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'title',
+          'creatorStudio',
+          'category',
+          'subtitle',
+          'description',
+          'thumbnailUrl',
+          'gameBundleUrl',
+          'isLandscapeOnly',
+          'legalRightsVerified',
+          'accentColor',
+          'rating',
+          'activePlayersLabel',
+          'xpRewardMultiplier',
+          'ownerUid',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 80
+        && data.creatorStudio is string && data.creatorStudio.size() >= 2 && data.creatorStudio.size() <= 80
+        && data.category in ['3D Action', 'Racing & Drift', 'Arcade & Reflex', '2-Player']
+        && isSafeAssetUrl(data.thumbnailUrl)
+        && isSafeAssetUrl(data.gameBundleUrl)
+        && data.isLandscapeOnly is bool
+        && data.legalRightsVerified is bool
+        && isValidId(data.ownerUid)
+        && (!('subtitle' in data) || (data.subtitle is string && data.subtitle.size() <= 100))
+        && (!('description' in data) || (data.description is string && data.description.size() <= 500))
+        && (!('accentColor' in data) || (data.accentColor in ['crimson', 'cyan']))
+        && (!('rating' in data) || (data.rating is number && data.rating >= 0 && data.rating <= 5))
+        && (!('activePlayersLabel' in data) || (data.activePlayersLabel is string && data.activePlayersLabel.size() <= 40))
+        && (!('xpRewardMultiplier' in data) || (data.xpRewardMultiplier is number && data.xpRewardMultiplier >= 0.5 && data.xpRewardMultiplier <= 5))
+        && data.createdAt is timestamp
+        && (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    // Validation Blueprint: PortalSettingsConfig
+    function isValidPortalSettings(data) {
+      return data.keys().hasAll([
+          'welcomeAnnouncement',
+          'whatsappSupportNumber',
+          'maintenanceMode',
+          'updatedByUid',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'welcomeAnnouncement',
+          'welcomeSubtitle',
+          'whatsappSupportNumber',
+          'maintenanceMode',
+          'maintenanceMessage',
+          'updatedByUid',
+          'updatedAt'
+        ])
+        && data.welcomeAnnouncement is string
+        && data.welcomeAnnouncement.size() >= 2
+        && data.welcomeAnnouncement.size() <= 140
+        && (!('welcomeSubtitle' in data) || (data.welcomeSubtitle is string && data.welcomeSubtitle.size() <= 200))
+        && data.whatsappSupportNumber is string
+        && data.whatsappSupportNumber.size() >= 6
+        && data.whatsappSupportNumber.size() <= 32
+        && data.whatsappSupportNumber.matches('^\\+?[0-9\\s\\-]{6,24}$')
+        && data.maintenanceMode is bool
+        && (!('maintenanceMessage' in data) || (data.maintenanceMessage is string && data.maintenanceMessage.size() <= 300))
+        && isValidId(data.updatedByUid)
+        && data.updatedAt is timestamp;
+    }
+
+    // Collection: /published_games/{gameId}
+    match /published_games/{gameId} {
+      allow get: if isValidId(gameId) && (
+        existing().legalRightsVerified == true
+        || isAdmin()
+      );
+      allow list: if resource.data.legalRightsVerified == true || isAdmin();
+
+      allow create: if isAdmin()
+        && isValidId(gameId)
+        && isValidPublishedGame(incoming())
+        && incoming().id == gameId
+        && incoming().ownerUid == request.auth.uid
+        && incoming().createdAt == request.time;
+
+      allow update: if isAdmin()
+        && isValidId(gameId)
+        && isValidPublishedGame(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().createdAt == existing().createdAt
+        && (!('updatedAt' in incoming()) || incoming().updatedAt == request.time)
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'creatorStudio',
+          'category',
+          'subtitle',
+          'description',
+          'thumbnailUrl',
+          'gameBundleUrl',
+          'isLandscapeOnly',
+          'legalRightsVerified',
+          'accentColor',
+          'rating',
+          'activePlayersLabel',
+          'xpRewardMultiplier',
+          'updatedAt'
+        ]);
+
+      allow delete: if isAdmin() && isValidId(gameId);
+    }
+
+    // Collection: /portal_settings/{configId}
+    match /portal_settings/{configId} {
+      allow get: if isValidId(configId) && (configId == 'config' || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isAdmin()
+        && isValidId(configId)
+        && configId == 'config'
+        && isValidPortalSettings(incoming())
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+
+      allow update: if isAdmin()
+        && isValidId(configId)
+        && configId == 'config'
+        && isValidPortalSettings(incoming())
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'welcomeAnnouncement',
+          'welcomeSubtitle',
+          'whatsappSupportNumber',
+          'maintenanceMode',
+          'maintenanceMessage',
+          'updatedByUid',
+          'updatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    // Collection: /admins/{uid}
+    match /admins/{uid} {
+      allow get: if isVerifiedUser() && isValidId(uid) && (request.auth.uid == uid || isAdmin());
+      allow list, create, update, delete: if false;
+    }
+  }
+}

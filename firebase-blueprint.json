@@ -1,0 +1,226 @@
+{
+  "entities": {
+    "PublishedGame": {
+      "title": "PublishedGame",
+      "description": "A verified community or owner-uploaded HTML5/WebGL game published live to Shadow Knight Game Zone.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique URL-safe slug or document identifier."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80,
+          "description": "Display title of the game."
+        },
+        "creatorStudio": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80,
+          "description": "Verified creator or studio name."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "3D Action",
+            "Racing & Drift",
+            "Arcade & Reflex",
+            "2-Player"
+          ],
+          "description": "Primary portal genre category."
+        },
+        "subtitle": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Optional short tagline."
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional game overview shown on cards."
+        },
+        "thumbnailUrl": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1024,
+          "pattern": "^(https:\\/\\/|gs:\\/\\/|[a-zA-Z0-9_\\-./]+).+",
+          "description": "HTTPS URL or Firebase Storage path to the 16:9 cover artwork."
+        },
+        "gameBundleUrl": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1024,
+          "pattern": "^(https:\\/\\/|gs:\\/\\/|[a-zA-Z0-9_\\-./]+).+",
+          "description": "HTTPS URL or Firebase Storage path to the playable WebGL/HTML5 game bundle."
+        },
+        "isLandscapeOnly": {
+          "type": "boolean",
+          "description": "Enforces 16:9 Force-Landscape presentation."
+        },
+        "legalRightsVerified": {
+          "type": "boolean",
+          "description": "True only after creator agreement and legal ownership verification."
+        },
+        "accentColor": {
+          "type": "string",
+          "enum": [
+            "crimson",
+            "cyan"
+          ],
+          "description": "Card border highlight accent."
+        },
+        "rating": {
+          "type": "number",
+          "description": "Portal rating between 0 and 5."
+        },
+        "activePlayersLabel": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "Display player count badge text."
+        },
+        "xpRewardMultiplier": {
+          "type": "number",
+          "description": "Session XP multiplier."
+        },
+        "ownerUid": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the publishing admin or owner."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "creatorStudio",
+        "category",
+        "thumbnailUrl",
+        "gameBundleUrl",
+        "isLandscapeOnly",
+        "legalRightsVerified",
+        "ownerUid",
+        "createdAt"
+      ]
+    },
+    "PortalSettingsConfig": {
+      "title": "PortalSettingsConfig",
+      "description": "Live remote portal settings managed by the Owner Companion App.",
+      "type": "object",
+      "properties": {
+        "welcomeAnnouncement": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 140,
+          "description": "Dynamic headline announcement displayed in the Hero Spotlight welcome banner."
+        },
+        "welcomeSubtitle": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Secondary announcement banner copy."
+        },
+        "whatsappSupportNumber": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 32,
+          "pattern": "^\\+?[0-9\\s\\-]{6,24}$",
+          "description": "Official WhatsApp support desk number shown in Support & Contact With Us."
+        },
+        "maintenanceMode": {
+          "type": "boolean",
+          "description": "When true, displays a real-time maintenance overlay across the portal."
+        },
+        "maintenanceMessage": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Optional notice displayed when maintenanceMode is active."
+        },
+        "updatedByUid": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the administrator who saved the config."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest settings sync."
+        }
+      },
+      "required": [
+        "welcomeAnnouncement",
+        "whatsappSupportNumber",
+        "maintenanceMode",
+        "updatedByUid",
+        "updatedAt"
+      ]
+    },
+    "AdminRole": {
+      "title": "AdminRole",
+      "description": "Trusted administrator access record keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 160,
+          "description": "Verified administrator email."
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "owner",
+            "admin"
+          ],
+          "description": "Administrative role tier."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": [
+        "email",
+        "role",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/published_games/{gameId}": {
+      "schema": {
+        "$ref": "#/entities/PublishedGame"
+      },
+      "description": "Published community and owner-uploaded games synced live to Shadow Knight Game Zone."
+    },
+    "/portal_settings/{configId}": {
+      "schema": {
+        "$ref": "#/entities/PortalSettingsConfig"
+      },
+      "description": "Live remote portal settings document (config)."
+    },
+    "/admins/{uid}": {
+      "schema": {
+        "$ref": "#/entities/AdminRole"
+      },
+      "description": "Trusted portal administrator records for RBAC verification."
+    }
+  }
+}
