@@ -120,7 +120,7 @@
     },
     "PortalSettingsConfig": {
       "title": "PortalSettingsConfig",
-      "description": "Live remote portal settings managed by the Owner Companion App.",
+      "description": "Live remote portal settings managed by the Owner Companion App or verified Owner Studio.",
       "type": "object",
       "properties": {
         "welcomeAnnouncement": {
@@ -171,6 +171,173 @@
         "updatedAt"
       ]
     },
+    "PlayerCloudProfile": {
+      "title": "PlayerCloudProfile",
+      "description": "Cloud-synced progression, coins, high scores, and Armory unlocks keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID owning this player profile."
+        },
+        "gamerTag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 18,
+          "description": "Public gamer tag shown on leaderboards."
+        },
+        "xp": {
+          "type": "number",
+          "description": "Accumulated player XP."
+        },
+        "coins": {
+          "type": "number",
+          "description": "Armory currency balance."
+        },
+        "streak": {
+          "type": "number",
+          "description": "Consecutive daily login streak count."
+        },
+        "lastActiveDate": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 12,
+          "description": "ISO calendar date (YYYY-MM-DD) of last activity."
+        },
+        "gamesPlayed": {
+          "type": "number",
+          "description": "Total completed game sessions."
+        },
+        "highScores": {
+          "type": "object",
+          "description": "Map of gameId to best score."
+        },
+        "preRegisteredIds": {
+          "type": "array",
+          "description": "Bounded list of pre-registered upcoming game IDs."
+        },
+        "equippedSkin": {
+          "type": "string",
+          "enum": [
+            "cyber-cyan",
+            "crimson-hellfire",
+            "solar-gold",
+            "void-amethyst"
+          ],
+          "description": "Currently equipped hero blade & energy skin."
+        },
+        "unlockedSkins": {
+          "type": "array",
+          "description": "Bounded list of unlocked Armory skin IDs."
+        },
+        "unlockedPerks": {
+          "type": "array",
+          "description": "Bounded list of unlocked permanent Armory perks."
+        },
+        "soundMuted": {
+          "type": "boolean",
+          "description": "Audio mute preference."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last sync timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "gamerTag",
+        "xp",
+        "coins",
+        "streak",
+        "lastActiveDate",
+        "gamesPlayed",
+        "highScores",
+        "preRegisteredIds",
+        "equippedSkin",
+        "unlockedSkins",
+        "unlockedPerks",
+        "soundMuted",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "GlobalLeaderboardEntry": {
+      "title": "GlobalLeaderboardEntry",
+      "description": "Public verified score submission for the global Shadow Knight rankings.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique entry identifier."
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the player."
+        },
+        "gamerTag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 18,
+          "description": "Player display tag."
+        },
+        "gameId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Game identifier."
+        },
+        "gameTitle": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80,
+          "description": "Display title of the game."
+        },
+        "score": {
+          "type": "number",
+          "description": "Run score."
+        },
+        "maxCombo": {
+          "type": "number",
+          "description": "Peak combo achieved."
+        },
+        "accuracy": {
+          "type": "number",
+          "description": "Hit accuracy percentage (0-100)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server submission timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "uid",
+        "gamerTag",
+        "gameId",
+        "gameTitle",
+        "score",
+        "maxCombo",
+        "accuracy",
+        "createdAt"
+      ]
+    },
     "AdminRole": {
       "title": "AdminRole",
       "description": "Trusted administrator access record keyed by Firebase Auth UID.",
@@ -215,6 +382,18 @@
         "$ref": "#/entities/PortalSettingsConfig"
       },
       "description": "Live remote portal settings document (config)."
+    },
+    "/players/{uid}": {
+      "schema": {
+        "$ref": "#/entities/PlayerCloudProfile"
+      },
+      "description": "Private cloud-synced player profile, XP, coins, high scores, and Armory unlocks."
+    },
+    "/leaderboard/{entryId}": {
+      "schema": {
+        "$ref": "#/entities/GlobalLeaderboardEntry"
+      },
+      "description": "Public global leaderboard scores submitted by authenticated verified players."
     },
     "/admins/{uid}": {
       "schema": {

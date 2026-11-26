@@ -89,11 +89,11 @@ export const PortalWelcomeBanner: React.FC<PortalWelcomeBannerProps> = ({
           </div>
         </div>
 
-        {/* Bottom Row: Quick Category Filter Buttons */}
+        {/* Bottom Row: Extra-Large Quick Category Filter Buttons */}
         <div
           role="tablist"
           aria-label="Game categories"
-          className="mt-3.5 pt-3 border-t border-white/10 flex items-center gap-1.5 overflow-x-auto no-scrollbar"
+          className="mt-4 pt-3.5 border-t border-white/10 flex items-center gap-2.5 overflow-x-auto no-scrollbar"
         >
           {PORTAL_CATEGORIES.map((category) => {
             const isActive = activeCategory === category;
@@ -104,10 +104,10 @@ export const PortalWelcomeBanner: React.FC<PortalWelcomeBannerProps> = ({
                 aria-selected={isActive}
                 type="button"
                 onClick={() => onSelectCategory(category)}
-                className={`min-h-[40px] px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-medium whitespace-nowrap shrink-0 transition cursor-pointer ${
+                className={`min-h-[46px] px-5 py-3 rounded-xl text-sm font-bold whitespace-nowrap shrink-0 transition cursor-pointer ${
                   isActive
-                    ? 'bg-[#FF1E42] text-white shadow-sm shadow-[#FF1E42]/30'
-                    : 'bg-[#07070F]/80 text-slate-300 border border-white/10 hover:text-white hover:border-[#00F0FF]/45'
+                    ? 'bg-[#FF1E42] text-white shadow-md shadow-[#FF1E42]/35'
+                    : 'bg-[#07070F]/85 text-slate-200 border border-white/15 hover:text-white hover:border-[#00F0FF]/55'
                 }`}
               >
                 {category === 'Community & Creator Games' ? 'Creator Games' : category}

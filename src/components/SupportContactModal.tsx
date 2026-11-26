@@ -90,9 +90,9 @@ export const SupportContactModal: React.FC<SupportContactModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Close support modal"
-            className="min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
+            className="min-w-[46px] min-h-[46px] flex items-center justify-center rounded-xl text-slate-300 hover:text-white hover:bg-white/10 transition cursor-pointer"
           >
-            <X className="w-5 h-5" />
+            <X className="w-6 h-6" />
           </button>
         </div>
 
@@ -125,20 +125,20 @@ export const SupportContactModal: React.FC<SupportContactModalProps> = ({
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2.5">
+              <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   onClick={() => void handleCopyNumber()}
-                  className="min-h-[40px] inline-flex items-center gap-1.5 rounded-lg bg-white/8 hover:bg-white/14 border border-white/15 px-3.5 py-2 text-xs font-semibold text-slate-100 transition cursor-pointer"
+                  className="min-h-[46px] inline-flex items-center gap-2 rounded-xl bg-white/10 hover:bg-white/18 border border-white/15 px-5 py-3 text-sm font-bold text-slate-100 transition cursor-pointer"
                 >
                   {copied ? (
                     <>
-                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <Check className="w-4 h-4 text-emerald-400" />
                       <span className="text-emerald-300">Copied</span>
                     </>
                   ) : (
                     <>
-                      <Copy className="w-3.5 h-3.5 text-[#00F0FF]" />
+                      <Copy className="w-4 h-4 text-[#00F0FF]" />
                       <span>Copy Number</span>
                     </>
                   )}
@@ -148,7 +148,7 @@ export const SupportContactModal: React.FC<SupportContactModalProps> = ({
                   href={buildSupportWhatsAppUrl(undefined, liveNumberDisplay)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="min-h-[40px] inline-flex items-center gap-2 rounded-lg bg-[#16A34A] hover:bg-[#15803D] px-4 py-2 text-xs font-bold text-white transition"
+                  className="min-h-[46px] inline-flex items-center gap-2 rounded-xl bg-[#16A34A] hover:bg-[#15803D] px-5 py-3 text-sm font-extrabold text-white transition"
                 >
                   <MessageCircle className="w-4 h-4" />
                   <span>Chat on WhatsApp</span>
@@ -250,7 +250,7 @@ export const SupportContactModal: React.FC<SupportContactModalProps> = ({
               </span>
               <button
                 type="submit"
-                className="min-h-[44px] inline-flex items-center gap-2 rounded-xl bg-[#FF1E42] hover:bg-[#ff3355] px-5 py-2.5 text-xs sm:text-sm font-bold text-white transition cursor-pointer shrink-0"
+                className="min-h-[50px] inline-flex items-center gap-2 rounded-xl bg-[#FF1E42] hover:bg-[#ff3355] px-7 py-3.5 text-sm sm:text-base font-extrabold text-white transition cursor-pointer shrink-0"
               >
                 <Send className="w-4 h-4" />
                 <span>Submit via WhatsApp</span>

@@ -1,12 +1,34 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
+import {
+  doc,
+  getDocFromServer,
+  getFirestore,
+  initializeFirestore,
+  memoryLocalCache,
+} from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+function createFirestoreInstance() {
+  try {
+    return initializeFirestore(
+      app,
+      {
+        experimentalForceLongPolling: true,
+        experimentalLongPollingOptions: { timeoutSeconds: 25 },
+        localCache: memoryLocalCache(),
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+
+export const db = createFirestoreInstance();
 export const storage = getStorage(app);
 export const auth = getAuth(app);
 
@@ -71,12 +93,19 @@ export function handleFirestoreError(
 }
 
 export async function testConnection(): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return false;
+  }
+
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Firestore offline check: Please verify your Firebase configuration.');
+    const code = (error as { code?: string } | null)?.code;
+    if (
+      code === 'unavailable' ||
+      (error instanceof Error && error.message.includes('the client is offline'))
+    ) {
       return false;
     }
     // Reaching server (even with permission-denied on test/connection) confirms online connectivity
@@ -84,4 +113,12 @@ export async function testConnection(): Promise<boolean> {
   }
 }
 
-void testConnection();
+if (typeof window !== 'undefined') {
+  if (typeof navigator === 'undefined' || navigator.onLine) {
+    void testConnection();
+  } else {
+    window.addEventListener('online', () => {
+      void testConnection();
+    }, { once: true });
+  }
+}

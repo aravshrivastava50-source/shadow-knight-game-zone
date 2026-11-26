@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
+  Eye,
   Flame,
   Heart,
   Home,
@@ -10,6 +11,7 @@ import {
   RotateCcw,
   Share2,
   ShieldAlert,
+  Skull,
   Sparkles,
   Sword,
   Trophy,
@@ -18,18 +20,30 @@ import {
   Wind,
   Zap,
 } from 'lucide-react';
+import { getArmorySkinConfig } from '../config/armory';
 import type { GameComponentProps } from '../types';
 import { checkDomainAuthorization } from '../utils/domainGuard';
 import { buildWhatsAppChallengeUrl } from '../utils/playerStorage';
 import { ChronoAudioEngine } from './chronoSlayer/audio';
 import {
+  createFirstPersonViewModel,
+  createGlbEnemyController,
+  createGlbHeroController,
+  loadWarriorGlbModels,
+  type GlbEnemyController,
+  type GlbHeroController,
+  type LoadedWarriorAssets,
+} from './chronoSlayer/glbWarriors';
+import {
   createChronoArenaTexture,
   createEnemyRigFactory,
   createHeroKnightRig,
+  type EnemyArchetype,
   type EnemyRig,
 } from './chronoSlayer/models';
 
 type SlayerPhase = 'TITLE_MENU' | 'PLAYING' | 'UPGRADE_PICK' | 'PAUSED' | 'VICTORY' | 'GAME_OVER';
+type CameraViewMode = '3RD' | '1ST';
 
 type UpgradeId =
   | 'chain-lightning'
@@ -93,10 +107,19 @@ interface FloatingDmg {
   color: string;
 }
 
+interface FallbackBar {
+  group: THREE.Group;
+  fill: THREE.Mesh;
+  dispose: () => void;
+}
+
 interface EnemyEntity {
   id: number;
-  kind: 'knight' | 'mage' | 'boss';
-  rig: EnemyRig;
+  kind: EnemyArchetype;
+  root: THREE.Group;
+  glb: GlbEnemyController | null;
+  fallbackRig: EnemyRig | null;
+  fallbackBar: FallbackBar | null;
   hp: number;
   maxHp: number;
   speed: number;
@@ -109,6 +132,10 @@ interface EnemyEntity {
   slamTimer: number;
   slamTargetX: number;
   slamTargetZ: number;
+  attackState: 'idle' | 'swinging';
+  attackAnimTimer: number;
+  attackAnimDuration: number;
+  attackImpactDone: boolean;
 }
 
 interface PooledProjectile {
@@ -161,15 +188,57 @@ const LIGHTNING_POOL_SIZE = 9;
 // Module-scope reusable math helpers (zero GC inside animation loop)
 const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
+const _camTargetPos = new THREE.Vector3();
+const _camLookTarget = new THREE.Vector3();
 const _projVec = new THREE.Vector3();
 const _dummy = new THREE.Object3D();
 const _tmpColor = new THREE.Color();
+
+function createFallbackBillboardBar(kind: EnemyArchetype): FallbackBar {
+  const group = new THREE.Group();
+  const barWidth = kind === 'boss' ? 2.4 : 1.15;
+  const barHeight = kind === 'boss' ? 0.18 : 0.11;
+  const heightY = kind === 'boss' ? 4.4 : kind === 'juggernaut' ? 2.6 : 2.15;
+  group.position.set(0, heightY, 0);
+
+  const bgGeo = new THREE.PlaneGeometry(barWidth + 0.06, barHeight + 0.05);
+  const bgMat = new THREE.MeshBasicMaterial({
+    color: 0x07070f,
+    transparent: true,
+    opacity: 0.85,
+    side: THREE.DoubleSide,
+  });
+  group.add(new THREE.Mesh(bgGeo, bgMat));
+
+  const fillGeo = new THREE.PlaneGeometry(barWidth, barHeight);
+  fillGeo.translate(barWidth / 2, 0, 0);
+  const fillMat = new THREE.MeshBasicMaterial({
+    color: kind === 'boss' ? 0xff1e42 : kind === 'mage' ? 0xe879f9 : 0xff3355,
+    side: THREE.DoubleSide,
+  });
+  const fill = new THREE.Mesh(fillGeo, fillMat);
+  fill.position.set(-barWidth / 2, 0, 0.008);
+  group.add(fill);
+
+  return {
+    group,
+    fill,
+    dispose: () => {
+      bgGeo.dispose();
+      bgMat.dispose();
+      fillGeo.dispose();
+      fillMat.dispose();
+    },
+  };
+}
 
 export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
   gameId,
   gameTitle,
   bestScore,
   isMuted,
+  equippedSkin = 'cyber-cyan',
+  unlockedPerks = [],
   onToggleMute,
   onSessionComplete,
   onExit,
@@ -178,14 +247,55 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
   const audioRef = useRef<ChronoAudioEngine | null>(null);
 
+  const skinConfig = getArmorySkinConfig(equippedSkin);
+  const hasVitalCore = unlockedPerks.includes('vital-core');
+  const hasChronoBattery = unlockedPerks.includes('chrono-battery');
+  const hasBladeTempering = unlockedPerks.includes('blade-tempering');
+  const initialMaxHp = hasVitalCore ? 185 : 150;
+  const initialNova = hasChronoBattery ? 75 : 35;
+
+  const armoryRef = useRef({
+    skinAccentHex: skinConfig.accentHex,
+    skinArmorHex: skinConfig.armorHex,
+    skinAccentCss: skinConfig.accentCss,
+    initialMaxHp,
+    initialNova,
+    damageBonusMult: hasBladeTempering ? 1.2 : 1.0,
+  });
+  armoryRef.current = {
+    skinAccentHex: skinConfig.accentHex,
+    skinArmorHex: skinConfig.armorHex,
+    skinAccentCss: skinConfig.accentCss,
+    initialMaxHp,
+    initialNova,
+    damageBonusMult: hasBladeTempering ? 1.2 : 1.0,
+  };
+
   const [phase, setPhase] = useState<SlayerPhase>('TITLE_MENU');
   const phaseRef = useRef<SlayerPhase>('TITLE_MENU');
 
+  const [cameraMode, setCameraMode] = useState<CameraViewMode>('3RD');
+  const cameraModeRef = useRef<CameraViewMode>('3RD');
+
+  const [modelLoading, setModelLoading] = useState<{
+    active: boolean;
+    percent: number;
+    label: string;
+  }>({
+    active: true,
+    percent: 5,
+    label: 'Loading 3D Warrior Models...',
+  });
+
   const [hudState, setHudState] = useState({
-    hp: 150,
-    maxHp: 150,
-    novaEnergy: 35,
+    hp: initialMaxHp,
+    maxHp: initialMaxHp,
+    novaEnergy: initialNova,
     wave: 1,
+    waveState: 'INCOMING' as 'INCOMING' | 'ACTIVE' | 'CLEARED_SLOWMO',
+    waveCountdown: 2.0,
+    enemiesRemaining: 0,
+    waveTotalEnemies: 0,
     score: 0,
     combo: 1,
     maxCombo: 1,
@@ -213,7 +323,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
   // Virtual joystick visual state
   const [joyVisual, setJoyVisual] = useState({ active: false, dx: 0, dy: 0 });
 
-  // Input + Gameplay mutable state refs
+  // Input + Look + Gameplay mutable state refs
   const inputRef = useRef({
     keys: new Set<string>(),
     joyX: 0,
@@ -221,6 +331,12 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     joyPointerId: null as number | null,
     joyOriginX: 0,
     joyOriginY: 0,
+    lookPointerId: null as number | null,
+    lookLastX: 0,
+    lookLastY: 0,
+    lookMovedDist: 0,
+    cameraYaw: 0,
+    cameraPitch: 0.14,
     attackRequested: false,
     dashRequested: false,
     novaRequested: false,
@@ -244,7 +360,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     dashCooldownDuration: 2.1,
     dashActiveTimer: 0,
     dashDirX: 0,
-    dashDirZ: 1,
+    dashDirZ: -1,
     invulnTimer: 0,
     comboStep: 0,
     attackAnimTimer: 0,
@@ -256,7 +372,12 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     cameraShake: 0,
     bannerTimer: 0,
     bannerText: '',
-    waveTransitionTimer: 0,
+    waveState: 'INCOMING' as 'INCOMING' | 'ACTIVE' | 'CLEARED_SLOWMO',
+    waveCountdown: 2.0,
+    waveClearTimer: 0,
+    waveTotalEnemies: 0,
+    lastKillX: 0,
+    lastKillZ: 0,
     upgrades: new Map<UpgradeId, number>(),
     nextEntityId: 1,
     nextFloatId: 1,
@@ -267,7 +388,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
   // Scene callbacks set once during WebGL initialization
   const engineActionsRef = useRef<{
     startNewRun: () => void;
-    spawnWave: (waveNum: number) => void;
+    beginWaveIncoming: (waveNum: number) => void;
     triggerAttack: () => void;
     triggerDash: () => void;
     triggerNova: () => void;
@@ -277,6 +398,14 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
   const setSyncedPhase = useCallback((next: SlayerPhase) => {
     phaseRef.current = next;
     setPhase(next);
+  }, []);
+
+  const toggleCameraView = useCallback(() => {
+    setCameraMode((prev) => {
+      const next: CameraViewMode = prev === '3RD' ? '1ST' : '3RD';
+      cameraModeRef.current = next;
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -372,11 +501,12 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.15;
-    // Cap pixelRatio <= 1.25 for butter-smooth 60fps on high-DPI mobile screens
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 1.25));
+    renderer.toneMappingExposure = 1.18;
+    // Cap pixelRatio <= 1.15 on mobile (1.35 desktop) for locked 60fps with zero stutter
+    renderer.setPixelRatio(
+      isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, isMobileBrowser ? 1.15 : 1.35)
+    );
     renderer.setSize(width, height);
-    // Disable heavy shadow maps on mobile browsers & software WebGL
     renderer.shadowMap.enabled = enableShadows;
     if (enableShadows) {
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -388,125 +518,186 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     mount.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x07070f);
-    scene.fog = new THREE.FogExp2(0x07070f, 0.021);
+    scene.background = new THREE.Color(0x07060f);
+    scene.fog = new THREE.FogExp2(0x090616, 0.022);
 
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     const envTex = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
     scene.environment = envTex;
     pmremGenerator.dispose();
 
-    const camera = new THREE.PerspectiveCamera(52, width / height, 0.1, 140);
-    camera.position.set(0, 11.5, 13.5);
-    camera.lookAt(0, 1.2, 0);
+    // Camera added to scene so First-Person Cyber-Arm ViewModel renders as a child of camera
+    const camera = new THREE.PerspectiveCamera(62, width / height, 0.1, 140);
+    camera.position.set(0.7, 2.1, 4.2);
+    camera.lookAt(0, 1.5, -8);
+    scene.add(camera);
 
-    // 3-Point Warm/Cool Lighting Rig
-    const hemiLight = new THREE.HemisphereLight(0x6ee7ff, 0x1e0b36, 0.95);
+    // First-Person POV Cyber-Arm + Energy Katana ViewModel
+    const fpViewModel = createFirstPersonViewModel(
+      armoryRef.current.skinAccentHex,
+      armoryRef.current.skinArmorHex
+    );
+    camera.add(fpViewModel.root);
+
+    // Dramatic 3-Point Studio + Combat Arena Lighting Rig
+    const hemiLight = new THREE.HemisphereLight(0x00f0ff, 0x16092b, 1.05);
     scene.add(hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xfff1e6, 2.0);
-    keyLight.position.set(12, 22, 14);
-    keyLight.castShadow = enableShadows;
+    // Warm Key/Rim Light
+    const warmRimLight = new THREE.DirectionalLight(0xffdfb8, 2.25);
+    warmRimLight.position.set(11, 18, 13);
+    warmRimLight.castShadow = enableShadows;
     if (enableShadows) {
-      keyLight.shadow.mapSize.set(1024, 1024);
-      keyLight.shadow.camera.near = 2;
-      keyLight.shadow.camera.far = 55;
-      keyLight.shadow.camera.left = -22;
-      keyLight.shadow.camera.right = 22;
-      keyLight.shadow.camera.top = 22;
-      keyLight.shadow.camera.bottom = -22;
-      keyLight.shadow.bias = -0.0005;
-      keyLight.shadow.normalBias = 0.02;
+      warmRimLight.shadow.mapSize.set(1024, 1024);
+      warmRimLight.shadow.camera.near = 2;
+      warmRimLight.shadow.camera.far = 55;
+      warmRimLight.shadow.camera.left = -22;
+      warmRimLight.shadow.camera.right = 22;
+      warmRimLight.shadow.camera.top = 22;
+      warmRimLight.shadow.camera.bottom = -22;
+      warmRimLight.shadow.bias = -0.0005;
+      warmRimLight.shadow.normalBias = 0.02;
     }
-    scene.add(keyLight);
+    scene.add(warmRimLight);
 
-    const rimLight = new THREE.DirectionalLight(0xff1e42, 1.4);
-    rimLight.position.set(-14, 10, -14);
-    scene.add(rimLight);
+    // Cool Cyan Fill Light
+    const cyanFillLight = new THREE.DirectionalLight(0x00f0ff, 1.55);
+    cyanFillLight.position.set(15, 7, -11);
+    scene.add(cyanFillLight);
 
-    // Extended dark horizon void floor + glowing Rune Arena disc
+    // Crimson Back Rim Light
+    const crimsonBackLight = new THREE.DirectionalLight(0xff1e42, 1.9);
+    crimsonBackLight.position.set(-15, 10, -14);
+    scene.add(crimsonBackLight);
+
+    // Extended dark horizon void floor + Reflective Dark Obsidian Rune Arena disc
     const outerVoidGeo = new THREE.CircleGeometry(95, 36);
     outerVoidGeo.rotateX(-Math.PI / 2);
     const outerVoidMat = new THREE.MeshStandardMaterial({
-      color: 0x06060c,
-      roughness: 0.95,
-      metalness: 0.1,
+      color: 0x05050b,
+      roughness: 0.94,
+      metalness: 0.15,
     });
     const outerVoidFloor = new THREE.Mesh(outerVoidGeo, outerVoidMat);
     outerVoidFloor.position.y = -0.03;
     scene.add(outerVoidFloor);
 
-    const arenaTex = createChronoArenaTexture(renderer.capabilities.getMaxAnisotropy());
+    const arenaTextures = createChronoArenaTexture(renderer.capabilities.getMaxAnisotropy());
     const arenaFloorGeo = new THREE.CylinderGeometry(
       ARENA_RADIUS + 0.5,
-      ARENA_RADIUS + 1.2,
-      0.35,
+      ARENA_RADIUS + 1.3,
+      0.38,
       48
     );
     const arenaFloorMat = new THREE.MeshStandardMaterial({
-      map: arenaTex,
-      roughness: 0.42,
-      metalness: 0.55,
+      map: arenaTextures.map,
+      roughnessMap: arenaTextures.roughnessMap,
+      roughness: 0.3,
+      metalness: 0.78,
+      envMapIntensity: 1.6,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
     });
     const arenaFloor = new THREE.Mesh(arenaFloorGeo, arenaFloorMat);
-    arenaFloor.position.y = -0.175;
+    arenaFloor.position.y = -0.19;
     arenaFloor.receiveShadow = enableShadows;
     scene.add(arenaFloor);
 
-    // Glowing arena boundary ring
-    const rimRingGeo = new THREE.TorusGeometry(ARENA_RADIUS + 0.15, 0.11, 8, 64);
+    // Dual glowing arcane boundary rings
+    const rimRingGeo = new THREE.TorusGeometry(ARENA_RADIUS + 0.16, 0.1, 8, 64);
     rimRingGeo.rotateX(Math.PI / 2);
     const rimRingMat = new THREE.MeshStandardMaterial({
       color: 0x00f0ff,
       emissive: 0x00f0ff,
-      emissiveIntensity: 1.5,
+      emissiveIntensity: 1.8,
     });
     const rimRing = new THREE.Mesh(rimRingGeo, rimRingMat);
-    rimRing.position.y = 0.03;
+    rimRing.position.y = 0.04;
     scene.add(rimRing);
 
-    // 12 Obsidian Perimeter Rune Pillars
-    const pillarGeo = new THREE.BoxGeometry(1.3, 6.2, 1.3);
-    const pillarMat = new THREE.MeshStandardMaterial({
-      color: 0x130d24,
-      metalness: 0.75,
-      roughness: 0.35,
+    const innerRimGeo = new THREE.TorusGeometry(ARENA_RADIUS - 0.12, 0.045, 6, 64);
+    innerRimGeo.rotateX(Math.PI / 2);
+    const innerRimMat = new THREE.MeshStandardMaterial({
+      color: 0xff1e42,
+      emissive: 0xff1e42,
+      emissiveIntensity: 1.5,
     });
-    const bandGeo = new THREE.BoxGeometry(1.38, 0.25, 1.38);
+    const innerRim = new THREE.Mesh(innerRimGeo, innerRimMat);
+    innerRim.position.y = 0.03;
+    scene.add(innerRim);
+
+    // 12 Cracked Obsidian Perimeter Pillars
+    const pillarBaseGeo = new THREE.CylinderGeometry(1.05, 1.24, 0.55, 8);
+    const pillarShaftGeo = new THREE.CylinderGeometry(0.66, 0.84, 5.2, 8);
+    const pillarCrownGeo = new THREE.CylinderGeometry(0.55, 0.72, 1.15, 7);
+    const pillarMat = new THREE.MeshStandardMaterial({
+      color: 0x140e24,
+      metalness: 0.72,
+      roughness: 0.36,
+    });
+    const bandGeo = new THREE.TorusGeometry(0.76, 0.065, 6, 16);
+    bandGeo.rotateX(Math.PI / 2);
+    const fissureGeo = new THREE.CylinderGeometry(0.03, 0.03, 2.2, 5);
     const cyanBandMat = new THREE.MeshStandardMaterial({
       color: 0x00f0ff,
       emissive: 0x00f0ff,
-      emissiveIntensity: 2.0,
+      emissiveIntensity: 2.1,
     });
     const crimsonBandMat = new THREE.MeshStandardMaterial({
       color: 0xff1e42,
       emissive: 0xff1e42,
-      emissiveIntensity: 2.0,
+      emissiveIntensity: 2.1,
     });
+
+    const floatingShards: { mesh: THREE.Mesh; baseY: number; phase: number }[] = [];
 
     for (let i = 0; i < 12; i++) {
       const ang = (i / 12) * Math.PI * 2;
-      const dist = ARENA_RADIUS + 1.7;
+      const dist = ARENA_RADIUS + 1.85;
       const px = Math.cos(ang) * dist;
       const pz = Math.sin(ang) * dist;
-      const pillar = new THREE.Mesh(pillarGeo, pillarMat);
-      pillar.position.set(px, 3.0, pz);
-      pillar.lookAt(0, 3.0, 0);
-      pillar.castShadow = enableShadows;
-      scene.add(pillar);
+      const isBroken = i % 2 === 1;
+      const glowMat = i % 2 === 0 ? cyanBandMat : crimsonBandMat;
 
-      const band = new THREE.Mesh(bandGeo, i % 2 === 0 ? cyanBandMat : crimsonBandMat);
-      band.position.set(px, 4.4, pz);
-      band.lookAt(0, 4.4, 0);
+      const base = new THREE.Mesh(pillarBaseGeo, pillarMat);
+      base.position.set(px, 0.25, pz);
+      scene.add(base);
+
+      const shaft = new THREE.Mesh(pillarShaftGeo, pillarMat);
+      shaft.scale.y = isBroken ? 0.72 : 1.0;
+      shaft.position.set(px, isBroken ? 2.15 : 2.9, pz);
+      shaft.rotation.z = isBroken ? ((i % 4 === 1 ? 1 : -1) * 0.04) : 0;
+      shaft.lookAt(0, shaft.position.y, 0);
+      shaft.castShadow = enableShadows;
+      scene.add(shaft);
+
+      const crown = new THREE.Mesh(pillarCrownGeo, pillarMat);
+      const crownY = isBroken ? 4.85 : 5.95;
+      crown.position.set(px, crownY, pz);
+      crown.rotation.set(isBroken ? 0.28 : 0.06, ang, isBroken ? -0.22 : 0.04);
+      scene.add(crown);
+      if (isBroken) {
+        floatingShards.push({ mesh: crown, baseY: crownY, phase: i * 0.9 });
+      }
+
+      const band = new THREE.Mesh(bandGeo, glowMat);
+      band.position.set(px, isBroken ? 3.55 : 4.5, pz);
       scene.add(band);
+
+      const fissure = new THREE.Mesh(fissureGeo, glowMat);
+      fissure.position.set(
+        px - Math.cos(ang) * 0.7,
+        isBroken ? 2.3 : 2.9,
+        pz - Math.sin(ang) * 0.7
+      );
+      fissure.rotation.z = (i % 2 === 0 ? 1 : -1) * 0.16;
+      scene.add(fissure);
     }
 
-    // Instanced Floating Ambient Energy Motes
-    const moteCount = 48;
-    const moteGeo = new THREE.OctahedronGeometry(0.11, 0);
+    // Instanced Floating Embers & Arcane Sparks
+    const moteCount = 64;
+    const moteGeo = new THREE.OctahedronGeometry(0.095, 0);
     const moteMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
     const moteInstanced = new THREE.InstancedMesh(moteGeo, moteMat, moteCount);
     moteInstanced.frustumCulled = false;
@@ -515,30 +706,23 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     for (let i = 0; i < moteCount; i++) {
       moteData.push({
         angle: Math.random() * Math.PI * 2,
-        radius: 4 + Math.random() * (ARENA_RADIUS + 3),
-        y: 0.5 + Math.random() * 7,
-        speed: 0.4 + Math.random() * 0.9,
+        radius: 3 + Math.random() * (ARENA_RADIUS + 4),
+        y: 0.4 + Math.random() * 8,
+        speed: 0.55 + Math.random() * 1.15,
         phase: Math.random() * Math.PI * 2,
       });
-      _tmpColor.setHex(i % 2 === 0 ? 0x00f0ff : i % 3 === 0 ? 0xff1e42 : 0xa855f7);
+      _tmpColor.setHex(i % 3 === 0 ? 0xff4500 : i % 3 === 1 ? 0x00f0ff : 0xff1e42);
       moteInstanced.setColorAt(i, _tmpColor);
     }
     if (moteInstanced.instanceColor) moteInstanced.instanceColor.needsUpdate = true;
     scene.add(moteInstanced);
 
-    // Hero Shadow Knight Rig
-    const heroRig = createHeroKnightRig();
-    if (!enableShadows) {
-      heroRig.root.traverse((obj) => {
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = false;
-        }
-      });
-    }
-    scene.add(heroRig.root);
+    // === Hero Controller (Rigged GLTF Soldier.glb + Fallback Sculpted Knight) ===
+    const heroAnchor = new THREE.Group();
+    heroAnchor.rotation.y = Math.PI; // Facing -Z into the arena at start
+    scene.add(heroAnchor);
 
-    // Contact shadow disc under hero
-    const contactShadowGeo = new THREE.CircleGeometry(0.85, 20);
+    const contactShadowGeo = new THREE.CircleGeometry(0.82, 20);
     contactShadowGeo.rotateX(-Math.PI / 2);
     const contactShadowMat = new THREE.MeshBasicMaterial({
       color: 0x000000,
@@ -548,10 +732,43 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     });
     const heroShadow = new THREE.Mesh(contactShadowGeo, contactShadowMat);
     heroShadow.position.y = 0.02;
-    heroRig.root.add(heroShadow);
+    heroAnchor.add(heroShadow);
+
+    const fallbackHeroRig = createHeroKnightRig();
+    if (!enableShadows) {
+      fallbackHeroRig.root.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) obj.castShadow = false;
+      });
+    }
+    heroAnchor.add(fallbackHeroRig.root);
+
+    let glbAssets: LoadedWarriorAssets = { soldier: null, xbot: null };
+    let glbHero: GlbHeroController | null = null;
+    let disposed = false;
+
+    void loadWarriorGlbModels((percent, label) => {
+      if (disposed) return;
+      setModelLoading({ active: percent < 100, percent, label });
+    }).then((loaded) => {
+      if (disposed) return;
+      glbAssets = loaded;
+      const upgradedHero = createGlbHeroController(
+        loaded,
+        enableShadows,
+        armoryRef.current.skinAccentHex,
+        armoryRef.current.skinArmorHex
+      );
+      if (upgradedHero) {
+        glbHero = upgradedHero;
+        fallbackHeroRig.root.visible = false;
+        heroAnchor.add(upgradedHero.root);
+        applyUpgradeVisuals();
+      }
+      setModelLoading({ active: false, percent: 100, label: '3D Warriors Ready' });
+    });
 
     // Active slash trail arc mesh (reused)
-    const slashArcGeo = new THREE.RingGeometry(1.5, 3.6, 24, 1, -Math.PI * 0.45, Math.PI * 0.9);
+    const slashArcGeo = new THREE.RingGeometry(1.4, 3.5, 24, 1, -Math.PI * 0.45, Math.PI * 0.9);
     slashArcGeo.rotateX(-Math.PI / 2);
     const slashArcMat = new THREE.MeshBasicMaterial({
       color: 0x00f0ff,
@@ -565,6 +782,44 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     slashArcMesh.position.y = 1.25;
     slashArcMesh.visible = false;
     scene.add(slashArcMesh);
+
+    // Pooled Crimson Enemy Slash Arcs (shows enemy melee strike sweep cleanly)
+    const ENEMY_SLASH_POOL_SIZE = 4;
+    const enemySlashPool: { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial; life: number }[] = [];
+    for (let i = 0; i < ENEMY_SLASH_POOL_SIZE; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xff1e42,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const mesh = new THREE.Mesh(slashArcGeo, mat);
+      mesh.visible = false;
+      scene.add(mesh);
+      enemySlashPool.push({ mesh, mat, life: 0 });
+    }
+    const spawnEnemySlashArc = (
+      x: number,
+      z: number,
+      rotY: number,
+      scaleMult = 0.85,
+      colorHex = 0xff1e42
+    ) => {
+      for (let i = 0; i < ENEMY_SLASH_POOL_SIZE; i++) {
+        const s = enemySlashPool[i];
+        if (s.life > 0) continue;
+        s.life = 0.22;
+        s.mat.color.setHex(colorHex);
+        s.mat.opacity = 0.9;
+        s.mesh.position.set(x, 1.2, z);
+        s.mesh.rotation.y = rotY;
+        s.mesh.scale.setScalar(scaleMult);
+        s.mesh.visible = true;
+        break;
+      }
+    };
 
     // Vampiric Lifesteal Healing Aura Ring (reused)
     const healAuraGeo = new THREE.RingGeometry(0.65, 1.55, 24);
@@ -612,9 +867,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     scene.add(bossTelegraphMesh);
 
     // === OBJECT POOLS (Zero per-frame allocations & zero scene.add/remove churn) ===
-
-    // 1. Pooled Burst Particles via single InstancedMesh (1 draw call total)
-    const particleGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
+    const particleGeo = new THREE.BoxGeometry(0.14, 0.14, 0.14);
     const particleMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
     const particleInstanced = new THREE.InstancedMesh(particleGeo, particleMat, PARTICLE_POOL_SIZE);
     particleInstanced.frustumCulled = false;
@@ -643,7 +896,6 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     if (particleInstanced.instanceColor) particleInstanced.instanceColor.needsUpdate = true;
     scene.add(particleInstanced);
 
-    // 2. Pooled Void Mage Projectiles
     const projGeo = new THREE.SphereGeometry(0.28, 10, 10);
     const projMat = new THREE.MeshBasicMaterial({ color: 0xe879f9 });
     const projectilePool: PooledProjectile[] = [];
@@ -663,9 +915,8 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       });
     }
 
-    // 3. Pooled Dash Ghosts / Triple-Dash Shadow Clones
-    const ghostTorsoGeo = new THREE.BoxGeometry(0.76, 1.5, 0.42);
-    const ghostHeadGeo = new THREE.BoxGeometry(0.42, 0.42, 0.42);
+    const ghostTorsoGeo = new THREE.CapsuleGeometry(0.28, 0.85, 4, 8);
+    const ghostHeadGeo = new THREE.SphereGeometry(0.2, 8, 8);
     const ghostRingGeo = new THREE.RingGeometry(0.45, 2.3, 20);
     ghostRingGeo.rotateX(-Math.PI / 2);
     const ghostBasicMat = new THREE.MeshBasicMaterial({
@@ -706,7 +957,6 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       });
     }
 
-    // 4. Pooled Chain Lightning Bolts (pre-allocated Float32Array BufferAttributes)
     const lightningMat = new THREE.LineBasicMaterial({
       color: 0x00f0ff,
       transparent: true,
@@ -732,8 +982,8 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       });
     }
 
-    // Session-scoped Enemy Factory
-    const enemyFactory = createEnemyRigFactory();
+    // Fallback Enemy Factory (for offline/blocked environments)
+    const fallbackEnemyFactory = createEnemyRigFactory();
     let enemies: EnemyEntity[] = [];
 
     const floatingQueue: {
@@ -801,10 +1051,10 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         gh.life = isDamagingClone ? 0.36 : 0.26;
         gh.isDamagingClone = isDamagingClone;
         gh.hasDetonated = false;
-        gh.x = heroRig.root.position.x;
-        gh.z = heroRig.root.position.z;
-        gh.mesh.position.copy(heroRig.root.position);
-        gh.mesh.rotation.copy(heroRig.root.rotation);
+        gh.x = heroAnchor.position.x;
+        gh.z = heroAnchor.position.z;
+        gh.mesh.position.copy(heroAnchor.position);
+        gh.mesh.rotation.copy(heroAnchor.rotation);
         gh.mesh.scale.setScalar(1);
         const bodyMesh = gh.mesh.children[0] as THREE.Mesh;
         const headMesh = gh.mesh.children[1] as THREE.Mesh;
@@ -858,41 +1108,58 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       }
     };
 
-    const applyUpgradeVisuals = (upgradeId?: UpgradeId) => {
+    function applyUpgradeVisuals(upgradeId?: UpgradeId) {
       const g = gameRef.current;
       const hasFlame = (g.upgrades.get('crimson-flame') ?? 0) > 0;
-      if (hasFlame) {
-        // Transform greatsword cyan edge & aura into fiery crimson-orange flame!
-        heroRig.cyanEdgeMat.color.setHex(0xff5500);
-        heroRig.cyanEdgeMat.emissive.setHex(0xff4500);
-        heroRig.cyanEdgeMat.emissiveIntensity = 3.0;
-        heroRig.bladeTipMat.emissive.setHex(0xff5500);
-        heroRig.bladeTipMat.emissiveIntensity = 2.8;
-        heroRig.flameAura.color.setHex(0xff4500);
-        heroRig.flameAura.intensity = 2.8;
-      } else {
-        heroRig.cyanEdgeMat.color.setHex(0x00f0ff);
-        heroRig.cyanEdgeMat.emissive.setHex(0x00f0ff);
-        heroRig.cyanEdgeMat.emissiveIntensity = 2.2;
-        heroRig.bladeTipMat.emissive.setHex(0x00f0ff);
-        heroRig.bladeTipMat.emissiveIntensity = 1.8;
-        heroRig.flameAura.color.setHex(0x00f0ff);
-        heroRig.flameAura.intensity = 2.0;
+      const baseHex = armoryRef.current.skinAccentHex;
+      const edgeColor = hasFlame ? 0xff4500 : baseHex;
+      const tipColor = hasFlame ? 0xff6b2c : baseHex;
+      const intensity = hasFlame ? 3.0 : 2.3;
+
+      // Update GLB Hero Weapon + Aura
+      if (glbHero) {
+        glbHero.accentMat.color.setHex(baseHex);
+        glbHero.accentMat.emissive.setHex(baseHex);
+        glbHero.bladeEdgeMat.color.setHex(edgeColor);
+        glbHero.bladeEdgeMat.emissive.setHex(edgeColor);
+        glbHero.bladeEdgeMat.emissiveIntensity = intensity;
+        glbHero.bladeTipMat.emissive.setHex(tipColor);
+        glbHero.bladeTipMat.emissiveIntensity = intensity;
+        glbHero.flameAura.color.setHex(edgeColor);
+        glbHero.flameAura.intensity = hasFlame ? 3.0 : 2.2;
       }
+
+      // Update Fallback Hero Weapon + Aura
+      fallbackHeroRig.cyanEdgeMat.color.setHex(edgeColor);
+      fallbackHeroRig.cyanEdgeMat.emissive.setHex(edgeColor);
+      fallbackHeroRig.cyanEdgeMat.emissiveIntensity = intensity;
+      fallbackHeroRig.bladeTipMat.emissive.setHex(tipColor);
+      fallbackHeroRig.flameAura.color.setHex(edgeColor);
+
+      // Update First-Person Viewmodel Katana
+      fpViewModel.bladeEdgeMat.color.setHex(edgeColor);
+      fpViewModel.bladeEdgeMat.emissive.setHex(edgeColor);
+      fpViewModel.bladeEdgeMat.emissiveIntensity = intensity;
+      fpViewModel.bladeTipMat.emissive.setHex(tipColor);
+      fpViewModel.swordLight.color.setHex(edgeColor);
 
       if (upgradeId === 'vampiric-lifesteal' || upgradeId === 'chrono-overcharge') {
         healAuraMesh.visible = true;
-        healAuraMesh.position.set(heroRig.root.position.x, 0.14, heroRig.root.position.z);
+        healAuraMesh.position.set(heroAnchor.position.x, 0.14, heroAnchor.position.z);
         healAuraMesh.scale.setScalar(1);
         healAuraMat.opacity = 0.9;
         healAuraTimer = 0.35;
       }
+    }
+
+    const disposeEnemy = (enemy: EnemyEntity) => {
+      scene.remove(enemy.root);
+      enemy.glb?.dispose();
+      enemy.fallbackBar?.dispose();
     };
 
     const clearDynamicEntities = () => {
-      enemies.forEach((e) => {
-        scene.remove(e.rig.root);
-      });
+      enemies.forEach(disposeEnemy);
       enemies = [];
       bossTelegraphMesh.visible = false;
 
@@ -921,13 +1188,81 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       healAuraTimer = 0;
     };
 
-    const spawnWave = (waveNum: number) => {
+    const createEnemy = (kind: EnemyArchetype, x: number, z: number): EnemyEntity => {
+      const g = gameRef.current;
+      const glbCtrl = createGlbEnemyController(kind, glbAssets, enableShadows);
+
+      let root: THREE.Group;
+      let fallbackRig: EnemyRig | null = null;
+      let fallbackBar: FallbackBar | null = null;
+
+      if (glbCtrl) {
+        root = glbCtrl.root;
+      } else {
+        fallbackRig = fallbackEnemyFactory.spawn(kind, enableShadows);
+        fallbackBar = createFallbackBillboardBar(kind);
+        fallbackRig.root.add(fallbackBar.group);
+        root = fallbackRig.root;
+      }
+
+      root.position.set(x, 0, z);
+      scene.add(root);
+
+      const maxHp =
+        kind === 'boss'
+          ? 980 + Math.max(0, g.wave - 3) * 260
+          : kind === 'juggernaut'
+          ? 150 + g.wave * 34
+          : kind === 'mage'
+          ? 70 + g.wave * 16
+          : 65 + g.wave * 18;
+
+      const speed =
+        kind === 'boss'
+          ? 3.05
+          : kind === 'juggernaut'
+          ? 2.65 + Math.min(1.0, g.wave * 0.14)
+          : kind === 'mage'
+          ? 2.5 + Math.min(1.0, g.wave * 0.12)
+          : 4.7 + Math.min(2.0, g.wave * 0.25);
+
+      const radius =
+        kind === 'boss' ? 1.55 : kind === 'juggernaut' ? 0.92 : 0.68;
+
+      return {
+        id: g.nextEntityId++,
+        kind,
+        root,
+        glb: glbCtrl,
+        fallbackRig,
+        fallbackBar,
+        hp: maxHp,
+        maxHp,
+        speed,
+        radius,
+        attackCooldown: kind === 'boss' ? 1.8 : 0.7 + Math.random() * 0.6,
+        hitFlash: 0,
+        burnTimer: 0,
+        burnTickTimer: 0,
+        slamState: 'idle',
+        slamTimer: 0,
+        slamTargetX: 0,
+        slamTargetZ: 0,
+        attackState: 'idle',
+        attackAnimTimer: 0,
+        attackAnimDuration: 0.42,
+        attackImpactDone: false,
+      };
+    };
+
+    const spawnWaveEntities = (waveNum: number) => {
       const g = gameRef.current;
       g.wave = waveNum;
 
-      const isBossWave = waveNum % 5 === 0;
-      const knightCount = isBossWave ? 2 : 3 + waveNum * 2;
-      const mageCount = waveNum >= 2 ? (isBossWave ? 1 : Math.min(5, waveNum)) : 0;
+      const isBossWave = waveNum % 3 === 0;
+      const stalkerCount = isBossWave ? 2 : 2 + waveNum;
+      const juggCount = isBossWave ? 1 : Math.min(3, Math.max(1, Math.floor((waveNum + 1) / 2)));
+      const mageCount = waveNum >= 2 ? (isBossWave ? 1 : Math.min(3, waveNum - 1)) : 0;
 
       const placeAtPerimeter = (idx: number, total: number, minDist = 11, maxDist = 15.5) => {
         const ang = (idx / Math.max(1, total)) * Math.PI * 2 + Math.random() * 0.4;
@@ -935,100 +1270,72 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         return { x: Math.cos(ang) * r, z: Math.sin(ang) * r };
       };
 
-      const totalRegular = knightCount + mageCount;
-      for (let i = 0; i < knightCount; i++) {
+      const totalRegular = stalkerCount + juggCount + mageCount;
+      for (let i = 0; i < stalkerCount; i++) {
         const pos = placeAtPerimeter(i, totalRegular);
-        const rig = enemyFactory.spawn('knight', enableShadows);
-        rig.root.position.set(pos.x, 0, pos.z);
-        scene.add(rig.root);
-        const maxHp = 85 + waveNum * 22;
-        enemies.push({
-          id: g.nextEntityId++,
-          kind: 'knight',
-          rig,
-          hp: maxHp,
-          maxHp,
-          speed: 3.4 + Math.min(1.8, waveNum * 0.25),
-          radius: 0.72,
-          attackCooldown: 0.6 + Math.random() * 0.6,
-          hitFlash: 0,
-          burnTimer: 0,
-          burnTickTimer: 0,
-          slamState: 'idle',
-          slamTimer: 0,
-          slamTargetX: 0,
-          slamTargetZ: 0,
-        });
+        enemies.push(createEnemy('stalker', pos.x, pos.z));
+        spawnBurstParticles(pos.x, 1.0, pos.z, 0xff1e42, 6);
+      }
+
+      for (let i = 0; i < juggCount; i++) {
+        const pos = placeAtPerimeter(stalkerCount + i, totalRegular, 11.8, 15.8);
+        enemies.push(createEnemy('juggernaut', pos.x, pos.z));
+        spawnBurstParticles(pos.x, 1.2, pos.z, 0xff4500, 6);
       }
 
       for (let i = 0; i < mageCount; i++) {
-        const pos = placeAtPerimeter(knightCount + i, totalRegular, 12.5, 16.2);
-        const rig = enemyFactory.spawn('mage', enableShadows);
-        rig.root.position.set(pos.x, 0, pos.z);
-        scene.add(rig.root);
-        const maxHp = 65 + waveNum * 16;
-        enemies.push({
-          id: g.nextEntityId++,
-          kind: 'mage',
-          rig,
-          hp: maxHp,
-          maxHp,
-          speed: 2.5 + Math.min(1.0, waveNum * 0.12),
-          radius: 0.68,
-          attackCooldown: 1.4 + Math.random() * 1.1,
-          hitFlash: 0,
-          burnTimer: 0,
-          burnTickTimer: 0,
-          slamState: 'idle',
-          slamTimer: 0,
-          slamTargetX: 0,
-          slamTargetZ: 0,
-        });
+        const pos = placeAtPerimeter(stalkerCount + juggCount + i, totalRegular, 12.5, 16.2);
+        enemies.push(createEnemy('mage', pos.x, pos.z));
+        spawnBurstParticles(pos.x, 1.2, pos.z, 0xc026d3, 6);
       }
 
       if (isBossWave) {
-        const bossRig = enemyFactory.spawn('boss', enableShadows);
-        bossRig.root.position.set(0, 0, -12);
-        scene.add(bossRig.root);
-        const bossHp = 1150 + Math.max(0, waveNum - 5) * 280;
-        enemies.push({
-          id: g.nextEntityId++,
-          kind: 'boss',
-          rig: bossRig,
-          hp: bossHp,
-          maxHp: bossHp,
-          speed: 2.85,
-          radius: 1.55,
-          attackCooldown: 2.2,
-          hitFlash: 0,
-          burnTimer: 0,
-          burnTickTimer: 0,
-          slamState: 'idle',
-          slamTimer: 0,
-          slamTargetX: 0,
-          slamTargetZ: 0,
-        });
-        g.bannerText = `WAVE ${waveNum} · VOID TITAN AWAKENS`;
-        g.bannerTimer = 2.8;
+        enemies.push(createEnemy('boss', 0, -12));
+        spawnBurstParticles(0, 2.0, -12, 0xff1e42, 18);
+        g.bannerText = `CHRONO BOSS · WAVE ${waveNum}`;
+        g.bannerTimer = 2.4;
       } else {
-        g.bannerText = `WAVE ${waveNum} · ENGAGE`;
-        g.bannerTimer = 2.1;
+        g.bannerText = '';
+        g.bannerTimer = 0;
       }
+
+      g.waveTotalEnemies = enemies.length;
+    };
+
+    const beginWaveIncoming = (waveNum: number) => {
+      const g = gameRef.current;
+      g.wave = waveNum;
+      g.waveState = 'INCOMING';
+      g.waveCountdown = 2.0;
+      g.waveClearTimer = 0;
+      g.waveTotalEnemies = 0;
+
+      for (let i = 0; i < PROJECTILE_POOL_SIZE; i++) {
+        projectilePool[i].active = false;
+        projectilePool[i].mesh.visible = false;
+      }
+
+      const isBossWave = waveNum % 3 === 0;
+      g.bannerText = isBossWave
+        ? `WAVE ${waveNum} — CHRONO BOSS INCOMING!`
+        : `WAVE ${waveNum} — INCOMING!`;
+      g.bannerTimer = 2.0;
+      audio.playWaveIncoming(isBossWave);
     };
 
     const triggerLifestealHeal = (healAmount: number) => {
       const g = gameRef.current;
       g.hp = Math.min(g.maxHp, g.hp + healAmount);
       healAuraMesh.visible = true;
-      healAuraMesh.position.set(heroRig.root.position.x, 0.14, heroRig.root.position.z);
+      healAuraMesh.position.set(heroAnchor.position.x, 0.14, heroAnchor.position.z);
       healAuraMesh.scale.setScalar(0.8);
       healAuraMat.opacity = 0.92;
       healAuraTimer = 0.34;
-      spawnBurstParticles(heroRig.root.position.x, 1.1, heroRig.root.position.z, 0x10b981, 6);
+      spawnBurstParticles(heroAnchor.position.x, 1.1, heroAnchor.position.z, 0x10b981, 6);
       pushFloatingNumber(
-        heroRig.root.position.x,
-        2.5,
-        heroRig.root.position.z,
+        heroAnchor.position.x,
+        2.4,
+        heroAnchor.position.z,
         `+${healAmount} HP`,
         '#34D399'
       );
@@ -1051,31 +1358,34 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         enemy.burnTimer = 3.0;
       }
 
-      // Knockback away from player
-      const dx = enemy.rig.root.position.x - heroRig.root.position.x;
-      const dz = enemy.rig.root.position.z - heroRig.root.position.z;
+      const dx = enemy.root.position.x - heroAnchor.position.x;
+      const dz = enemy.root.position.z - heroAnchor.position.z;
       const dist = Math.hypot(dx, dz) || 1;
-      const kb = enemy.kind === 'boss' ? knockbackStrength * 0.25 : knockbackStrength;
-      enemy.rig.root.position.x += (dx / dist) * kb;
-      enemy.rig.root.position.z += (dz / dist) * kb;
+      const kb =
+        enemy.kind === 'boss'
+          ? knockbackStrength * 0.2
+          : enemy.kind === 'juggernaut'
+          ? knockbackStrength * 0.45
+          : knockbackStrength;
+      enemy.root.position.x += (dx / dist) * kb;
+      enemy.root.position.z += (dz / dist) * kb;
 
       pushFloatingNumber(
-        enemy.rig.root.position.x,
-        enemy.kind === 'boss' ? 4.4 : 2.2,
-        enemy.rig.root.position.z,
+        enemy.root.position.x,
+        enemy.kind === 'boss' ? 4.2 : 2.1,
+        enemy.root.position.z,
         `-${dmg}`,
         hitColor
       );
 
       spawnBurstParticles(
-        enemy.rig.root.position.x,
+        enemy.root.position.x,
         enemy.kind === 'boss' ? 2.2 : 1.2,
-        enemy.rig.root.position.z,
+        enemy.root.position.z,
         flameStacks > 0 ? 0xff4500 : enemy.kind === 'boss' ? 0xff1e42 : 0x00f0ff,
         7
       );
 
-      // Vampiric Lifesteal: +15 HP per enemy hit (scales with stacks) + green/crimson aura burst
       const vampStacks = g.upgrades.get('vampiric-lifesteal') ?? 0;
       if (allowVampiric && vampStacks > 0) {
         triggerLifestealHeal(15 * vampStacks);
@@ -1083,9 +1393,16 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
 
       if (enemy.hp <= 0) {
         g.kills += 1;
+        g.lastKillX = enemy.root.position.x;
+        g.lastKillZ = enemy.root.position.z;
         g.score +=
-          (enemy.kind === 'boss' ? 1200 : enemy.kind === 'mage' ? 160 : 120) *
-          Math.min(4, 1 + Math.floor(g.combo / 5));
+          (enemy.kind === 'boss'
+            ? 1400
+            : enemy.kind === 'juggernaut'
+            ? 210
+            : enemy.kind === 'mage'
+            ? 160
+            : 130) * Math.min(4, 1 + Math.floor(g.combo / 5));
         const overchargeStacks = g.upgrades.get('chrono-overcharge') ?? 0;
         const novaGain = (enemy.kind === 'boss' ? 50 : 14) * (1 + overchargeStacks * 0.5);
         g.novaEnergy = Math.min(100, g.novaEnergy + novaGain);
@@ -1093,13 +1410,13 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
           triggerLifestealHeal(28);
         }
         spawnBurstParticles(
-          enemy.rig.root.position.x,
+          enemy.root.position.x,
           1.3,
-          enemy.rig.root.position.z,
+          enemy.root.position.z,
           0xff1e42,
           enemy.kind === 'boss' ? 26 : 12
         );
-        scene.remove(enemy.rig.root);
+        disposeEnemy(enemy);
         if (enemy.kind === 'boss') {
           bossTelegraphMesh.visible = false;
         }
@@ -1126,48 +1443,52 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       g.comboChainWindow = 0.72;
       g.attackBuffered = false;
 
+      // Face camera look direction when slashing so Over-the-Shoulder & 1st-Person strikes always aim where player looks
+      heroAnchor.rotation.y = inputRef.current.cameraYaw + Math.PI;
+
       audio.playSwordSwing(g.comboStep);
 
       const flameStacks = g.upgrades.get('crimson-flame') ?? 0;
-
-      // Show glowing slash arc (turns fiery crimson-orange with Crimson Flame Blade!)
       slashArcMesh.visible = true;
-      slashArcMesh.position.set(heroRig.root.position.x, 1.25, heroRig.root.position.z);
-      slashArcMesh.rotation.y = heroRig.root.rotation.y + (g.comboStep === 2 ? 0.35 : -0.2);
+      slashArcMesh.position.set(heroAnchor.position.x, 1.25, heroAnchor.position.z);
+      slashArcMesh.rotation.y = heroAnchor.rotation.y + (g.comboStep === 2 ? 0.35 : -0.2);
       const scaleMult = (g.comboStep === 3 ? 1.26 : 1.0) * (speedStacks > 0 ? 1.18 : 1.0);
       slashArcMesh.scale.setScalar(scaleMult);
       if (flameStacks > 0) {
         slashArcMat.color.setHex(g.comboStep === 3 ? 0xff1e42 : 0xff4500);
       } else {
         slashArcMat.color.setHex(
-          g.comboStep === 2 ? 0xff1e42 : g.comboStep === 3 ? 0xc084fc : 0x00f0ff
+          g.comboStep === 2
+            ? 0xff1e42
+            : g.comboStep === 3
+            ? 0xc084fc
+            : armoryRef.current.skinAccentHex
         );
       }
       slashArcMat.opacity = 0.9;
 
-      // Slight forward lunge on strike
-      const fx = Math.sin(heroRig.root.rotation.y);
-      const fz = Math.cos(heroRig.root.rotation.y);
-      heroRig.root.position.x += fx * (g.comboStep === 3 ? 0.85 : 0.45);
-      heroRig.root.position.z += fz * (g.comboStep === 3 ? 0.85 : 0.45);
+      const fx = Math.sin(heroAnchor.rotation.y);
+      const fz = Math.cos(heroAnchor.rotation.y);
+      heroAnchor.position.x += fx * (g.comboStep === 3 ? 0.85 : 0.45);
+      heroAnchor.position.z += fz * (g.comboStep === 3 ? 0.85 : 0.45);
 
       const baseDmg = g.comboStep === 3 ? 74 : g.comboStep === 2 ? 46 : 38;
       const flameMult = 1 + flameStacks * 0.4;
-      const dmg = baseDmg * flameMult;
-      const reach = (g.comboStep === 3 ? 4.4 : 3.65) * (speedStacks > 0 ? 1.18 : 1.0);
-      const minDot = g.comboStep === 3 ? -0.45 : 0.15;
+      const dmg = baseDmg * flameMult * armoryRef.current.damageBonusMult;
+      const reach = (g.comboStep === 3 ? 4.5 : 3.75) * (speedStacks > 0 ? 1.18 : 1.0);
+      const minDot = g.comboStep === 3 ? -0.45 : 0.1;
 
       let landedAny = false;
       const primaryHitEnemies: EnemyEntity[] = [];
 
       for (const enemy of enemies) {
         if (enemy.hp <= 0) continue;
-        const dx = enemy.rig.root.position.x - heroRig.root.position.x;
-        const dz = enemy.rig.root.position.z - heroRig.root.position.z;
+        const dx = enemy.root.position.x - heroAnchor.position.x;
+        const dz = enemy.root.position.z - heroAnchor.position.z;
         const dist = Math.hypot(dx, dz);
         if (dist <= reach + enemy.radius) {
           const dot = dist > 0.001 ? (dx / dist) * fx + (dz / dist) * fz : 1;
-          if (dot >= minDot || dist < 1.5) {
+          if (dot >= minDot || dist < 1.65) {
             landedAny = true;
             primaryHitEnemies.push(enemy);
             damageEnemy(
@@ -1196,7 +1517,6 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         g.cameraShake = g.comboStep === 3 ? 0.42 : 0.2;
         audio.playSwordHit(g.comboStep === 3);
 
-        // Chain Lightning Upgrade Proc: arc visible cyan bolts to up to 3 nearby enemies
         const lightningStacks = g.upgrades.get('chain-lightning') ?? 0;
         if (lightningStacks > 0 && primaryHitEnemies.length > 0) {
           const source = primaryHitEnemies[0];
@@ -1204,16 +1524,16 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
           for (const target of enemies) {
             if (target.hp <= 0 || target.id === source.id) continue;
             const d = Math.hypot(
-              target.rig.root.position.x - source.rig.root.position.x,
-              target.rig.root.position.z - source.rig.root.position.z
+              target.root.position.x - source.root.position.x,
+              target.root.position.z - source.root.position.z
             );
             if (d <= 10.5 && arcs < 3) {
               arcs++;
               spawnLightningArc(
-                source.rig.root.position.x,
-                source.rig.root.position.z,
-                target.rig.root.position.x,
-                target.rig.root.position.z
+                source.root.position.x,
+                source.root.position.z,
+                target.root.position.x,
+                target.root.position.z
               );
               damageEnemy(target, 38 * lightningStacks, 0.25, '#00F0FF', false);
             }
@@ -1225,6 +1545,37 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       enemies = enemies.filter((e) => e.hp > 0);
     };
 
+    const getCameraRelativeInputVector = () => {
+      const inp = inputRef.current;
+      let rawX = inp.joyX;
+      let rawY = inp.joyY;
+
+      if (inp.keys.has('KeyA') || inp.keys.has('ArrowLeft')) rawX -= 1;
+      if (inp.keys.has('KeyD') || inp.keys.has('ArrowRight')) rawX += 1;
+      if (inp.keys.has('KeyW') || inp.keys.has('ArrowUp')) rawY -= 1;
+      if (inp.keys.has('KeyS') || inp.keys.has('ArrowDown')) rawY += 1;
+
+      const len = Math.hypot(rawX, rawY);
+      if (len < 0.01) return { x: 0, z: 0 };
+      if (len > 1) {
+        rawX /= len;
+        rawY /= len;
+      }
+
+      // Transform input (rawX = right, -rawY = forward) into world XZ via cameraYaw
+      const yaw = inp.cameraYaw;
+      const fwdX = -Math.sin(yaw);
+      const fwdZ = -Math.cos(yaw);
+      const rightX = Math.cos(yaw);
+      const rightZ = -Math.sin(yaw);
+      const forwardAmt = -rawY;
+
+      return {
+        x: rightX * rawX + fwdX * forwardAmt,
+        z: rightZ * rawX + fwdZ * forwardAmt,
+      };
+    };
+
     const executeDash = () => {
       const g = gameRef.current;
       if (phaseRef.current !== 'PLAYING') return;
@@ -1234,16 +1585,16 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       g.dashActiveTimer = 0.22;
       g.invulnTimer = 0.34;
 
-      const moveVec = getInputVector();
+      const moveVec = getCameraRelativeInputVector();
       if (Math.hypot(moveVec.x, moveVec.z) > 0.1) {
         g.dashDirX = moveVec.x;
         g.dashDirZ = moveVec.z;
       } else {
-        g.dashDirX = Math.sin(heroRig.root.rotation.y);
-        g.dashDirZ = Math.cos(heroRig.root.rotation.y);
+        g.dashDirX = -Math.sin(inputRef.current.cameraYaw);
+        g.dashDirZ = -Math.cos(inputRef.current.cameraYaw);
       }
 
-      heroRig.root.rotation.y = Math.atan2(g.dashDirX, g.dashDirZ);
+      heroAnchor.rotation.y = Math.atan2(g.dashDirX, g.dashDirZ);
       audio.playDash();
       const tripleDashStacks = g.upgrades.get('triple-dash') ?? 0;
       spawnDashGhost(tripleDashStacks > 0);
@@ -1261,7 +1612,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       audio.playCosmicNova();
 
       novaSphere.visible = true;
-      novaSphere.position.set(heroRig.root.position.x, 1.0, heroRig.root.position.z);
+      novaSphere.position.set(heroAnchor.position.x, 1.0, heroAnchor.position.z);
       novaSphere.scale.setScalar(1);
       novaSphereMat.opacity = 0.95;
       novaAnimTimer = 0.55;
@@ -1270,8 +1621,8 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       for (const enemy of enemies) {
         if (enemy.hp <= 0) continue;
         const d = Math.hypot(
-          enemy.rig.root.position.x - heroRig.root.position.x,
-          enemy.rig.root.position.z - heroRig.root.position.z
+          enemy.root.position.x - heroAnchor.position.x,
+          enemy.root.position.z - heroAnchor.position.z
         );
         if (d <= novaRadius) {
           damageEnemy(enemy, 185, 2.6, '#FF1E42', true);
@@ -1281,40 +1632,27 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       }
       g.comboResetTimer = 3.5;
       enemies = enemies.filter((e) => e.hp > 0);
-      spawnBurstParticles(heroRig.root.position.x, 1.2, heroRig.root.position.z, 0x00f0ff, 22);
+      spawnBurstParticles(heroAnchor.position.x, 1.2, heroAnchor.position.z, 0x00f0ff, 22);
       pushFloatingNumber(
-        heroRig.root.position.x,
+        heroAnchor.position.x,
         3.1,
-        heroRig.root.position.z,
+        heroAnchor.position.z,
         'COSMIC NOVA!',
         '#00F0FF'
       );
     };
 
-    const getInputVector = () => {
-      const inp = inputRef.current;
-      let x = inp.joyX;
-      let z = inp.joyY;
-
-      if (inp.keys.has('KeyW') || inp.keys.has('ArrowUp')) z -= 1;
-      if (inp.keys.has('KeyS') || inp.keys.has('ArrowDown')) z += 1;
-      if (inp.keys.has('KeyA') || inp.keys.has('ArrowLeft')) x -= 1;
-      if (inp.keys.has('KeyD') || inp.keys.has('ArrowRight')) x += 1;
-
-      const len = Math.hypot(x, z);
-      if (len > 1) {
-        x /= len;
-        z /= len;
-      }
-      return { x, z };
-    };
-
     const startNewRun = () => {
-      clearDynamicEntities();
       const g = gameRef.current;
-      g.hp = 150;
-      g.maxHp = 150;
-      g.novaEnergy = 35;
+      clearDynamicEntities();
+      floatingQueue.length = 0;
+      setFloatingNumbers([]);
+      setAcquiredUpgrades([]);
+      setSessionRewards(null);
+
+      g.hp = armoryRef.current.initialMaxHp;
+      g.maxHp = armoryRef.current.initialMaxHp;
+      g.novaEnergy = armoryRef.current.initialNova;
       g.wave = 1;
       g.score = 0;
       g.combo = 1;
@@ -1336,105 +1674,107 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       g.attackBuffered = false;
       g.hitStopTimer = 0;
       g.cameraShake = 0;
-      g.waveTransitionTimer = 0;
       g.upgrades.clear();
       g.reportedSession = false;
       g.endlessMode = false;
 
-      heroRig.root.position.set(0, 0, 3);
-      heroRig.root.rotation.y = Math.PI;
+      heroAnchor.position.set(0, 0, 4.5);
+      heroAnchor.rotation.set(0, Math.PI, 0);
+      inputRef.current.cameraYaw = 0;
+      inputRef.current.cameraPitch = 0.14;
       applyUpgradeVisuals();
-      setAcquiredUpgrades([]);
-      setSessionRewards(null);
-      floatingQueue.length = 0;
-      setFloatingNumbers([]);
-
-      spawnWave(1);
+      beginWaveIncoming(1);
       setSyncedPhase('PLAYING');
     };
 
     engineActionsRef.current = {
       startNewRun,
-      spawnWave,
+      beginWaveIncoming,
       triggerAttack: executeSwordAttack,
       triggerDash: executeDash,
       triggerNova: executeCosmicNova,
       applyUpgradeVisuals,
     };
 
-    // Pre-compile shaders on hardware GPU
+    // Pre-warm shaders once on non-software WebGL
     if (!isSoftwareGl) {
       renderer.compile(scene, camera);
     }
 
-    // ResizeObserver & orientation change sync
     const handleResize = () => {
-      if (!mount) return;
-      const w = Math.max(320, mount.clientWidth);
-      const h = Math.max(180, mount.clientHeight);
+      const w = Math.max(320, mount.clientWidth || 960);
+      const h = Math.max(180, mount.clientHeight || 540);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
+      renderer.setPixelRatio(
+        isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, isMobileBrowser ? 1.15 : 1.35)
+      );
       renderer.setSize(w, h);
     };
+
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(mount);
     window.addEventListener('resize', handleResize);
     window.addEventListener('orientationchange', handleResize);
 
-    // Simulation Loop
     const clock = new THREE.Clock();
     let frameId = 0;
-    let disposed = false;
     let hudSyncAccum = 0;
     let ghostSpawnTimer = 0;
+    let hadFloatingLastSync = false;
 
-    const afterDraw = (cb: () => void) => {
+    function afterDraw(cb: () => void) {
       const gl = renderer.getContext() as WebGL2RenderingContext;
-      if (!gl || !gl.fenceSync) {
-        frameId = window.setTimeout(cb, 80);
-        return;
-      }
-      const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      const sync = gl.fenceSync ? gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) : null;
       gl.flush();
       const poll = () => {
         if (disposed) return;
-        const state = sync && gl.getSyncParameter(sync, gl.SYNC_STATUS);
-        if (state === gl.UNSIGNALED) {
-          frameId = window.setTimeout(poll, 5);
+        const state = sync && gl.getSyncParameter ? gl.getSyncParameter(sync, gl.SYNC_STATUS) : 1;
+        if (sync && state === gl.UNSIGNALED) {
+          frameId = window.setTimeout(poll, 4);
         } else {
-          if (sync) gl.deleteSync(sync);
-          frameId = window.setTimeout(cb, 80);
+          if (sync && gl.deleteSync) gl.deleteSync(sync);
+          frameId = window.setTimeout(cb, 24);
         }
       };
-      frameId = window.setTimeout(poll, 5);
-    };
+      frameId = window.setTimeout(poll, 4);
+    }
 
     const tick = () => {
       if (disposed) return;
-
       const rawDt = Math.min(0.05, clock.getDelta());
       const elapsed = clock.elapsedTime;
       const g = gameRef.current;
 
-      // Animate floating ambient energy motes even in Title Menu
+      // Ambient Arena Animations (Embers + Floating Broken Pillar Crowns)
+      for (let i = 0; i < floatingShards.length; i++) {
+        const fs = floatingShards[i];
+        fs.mesh.position.y = fs.baseY + Math.sin(elapsed * 1.8 + fs.phase) * 0.22;
+        fs.mesh.rotation.y += rawDt * 0.45;
+      }
+
       for (let i = 0; i < moteCount; i++) {
         const m = moteData[i];
-        m.y += rawDt * m.speed;
-        if (m.y > 8.5) m.y = 0.4;
+        m.y += m.speed * rawDt;
+        if (m.y > 9.5) m.y = 0.3;
+        const a = m.angle + elapsed * 0.16;
         _dummy.position.set(
-          Math.cos(m.angle + elapsed * 0.1) * m.radius,
+          Math.cos(a) * m.radius,
           m.y + Math.sin(elapsed * 2 + m.phase) * 0.25,
-          Math.sin(m.angle + elapsed * 0.1) * m.radius
+          Math.sin(a) * m.radius
         );
-        _dummy.rotation.y = elapsed * 1.4 + m.phase;
-        _dummy.scale.setScalar(1);
+        _dummy.rotation.set(elapsed + m.phase, elapsed * 0.7, 0);
+        _dummy.scale.setScalar(0.85 + Math.sin(elapsed * 3 + m.phase) * 0.3);
         _dummy.updateMatrix();
         moteInstanced.setMatrixAt(i, _dummy.matrix);
       }
       moteInstanced.instanceMatrix.needsUpdate = true;
 
+      const isFirstPerson = cameraModeRef.current === '1ST' && phaseRef.current === 'PLAYING';
+      heroAnchor.visible = !isFirstPerson;
+      fpViewModel.root.visible = isFirstPerson;
+
       if (phaseRef.current === 'PLAYING') {
-        // Consume queued touch/button actions
         if (inputRef.current.attackRequested) {
           inputRef.current.attackRequested = false;
           executeSwordAttack();
@@ -1448,14 +1788,22 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
           executeCosmicNova();
         }
 
-        // Hit-stop freeze frame for visceral sword impact
-        let dt = rawDt;
         if (g.hitStopTimer > 0) {
           g.hitStopTimer = Math.max(0, g.hitStopTimer - rawDt);
-          dt = rawDt * 0.14;
         }
 
-        // Dash recharge
+        const timeScale = g.waveState === 'CLEARED_SLOWMO' ? 0.22 : 1.0;
+        const dt = (g.hitStopTimer > 0 ? rawDt * 0.14 : rawDt) * timeScale;
+
+        // Wave Incoming Countdown
+        if (g.waveState === 'INCOMING') {
+          g.waveCountdown = Math.max(0, g.waveCountdown - dt);
+          if (g.waveCountdown <= 0) {
+            g.waveState = 'ACTIVE';
+            spawnWaveEntities(g.wave);
+          }
+        }
+
         if (g.dashCharges < g.maxDashCharges) {
           g.dashRechargeTimer += dt;
           if (g.dashRechargeTimer >= g.dashCooldownDuration) {
@@ -1464,12 +1812,11 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
           }
         }
 
-        // Timers
         if (g.invulnTimer > 0) g.invulnTimer = Math.max(0, g.invulnTimer - dt);
         if (g.attackCooldownTimer > 0)
           g.attackCooldownTimer = Math.max(0, g.attackCooldownTimer - dt);
         if (g.comboChainWindow > 0) g.comboChainWindow = Math.max(0, g.comboChainWindow - dt);
-        if (g.bannerTimer > 0) {
+        if (g.bannerTimer > 0 && g.waveState === 'ACTIVE') {
           g.bannerTimer = Math.max(0, g.bannerTimer - dt);
           if (g.bannerTimer === 0) g.bannerText = '';
         }
@@ -1478,73 +1825,142 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
           if (g.comboResetTimer <= 0) g.combo = 1;
         }
 
-        // Player Movement & Dash
+        // Player Movement, Dash & Skeletal Animation State
+        let isMoving = false;
         if (g.dashActiveTimer > 0) {
+          isMoving = true;
           g.dashActiveTimer = Math.max(0, g.dashActiveTimer - dt);
-          heroRig.root.position.x += g.dashDirX * 22 * dt;
-          heroRig.root.position.z += g.dashDirZ * 22 * dt;
+          heroAnchor.position.x += g.dashDirX * 22 * dt;
+          heroAnchor.position.z += g.dashDirZ * 22 * dt;
+          fallbackHeroRig.capeMesh.rotation.x = 0.72;
+          fallbackHeroRig.scarfMesh.rotation.x = 0.85;
           ghostSpawnTimer += dt;
           if (ghostSpawnTimer >= 0.065) {
             ghostSpawnTimer = 0;
             const tripleDashStacks = g.upgrades.get('triple-dash') ?? 0;
             spawnDashGhost(tripleDashStacks > 0);
           }
+          glbHero?.setAnimState('run');
         } else {
-          const mv = getInputVector();
+          const mv = getCameraRelativeInputVector();
           const mag = Math.hypot(mv.x, mv.z);
           if (mag > 0.08) {
-            const moveSpeed = 7.6;
-            heroRig.root.position.x += mv.x * moveSpeed * dt;
-            heroRig.root.position.z += mv.z * moveSpeed * dt;
+            isMoving = true;
+            const moveSpeed = 7.8;
+            heroAnchor.position.x += mv.x * moveSpeed * dt;
+            heroAnchor.position.z += mv.z * moveSpeed * dt;
             const targetRot = Math.atan2(mv.x, mv.z);
-            let diff = targetRot - heroRig.root.rotation.y;
+            let diff = targetRot - heroAnchor.rotation.y;
             while (diff > Math.PI) diff -= Math.PI * 2;
             while (diff < -Math.PI) diff += Math.PI * 2;
-            heroRig.root.rotation.y += diff * Math.min(1, dt * 14);
+            heroAnchor.rotation.y += diff * Math.min(1, dt * 14);
 
-            // Walk stride animation
-            const walkCycle = Math.sin(elapsed * 14);
-            heroRig.leftLeg.rotation.x = walkCycle * 0.5;
-            heroRig.rightLeg.rotation.x = -walkCycle * 0.5;
-            heroRig.leftArm.rotation.x = -walkCycle * 0.35;
-            heroRig.capeMesh.rotation.x = 0.45 + Math.sin(elapsed * 10) * 0.12;
+            glbHero?.setAnimState(mag > 0.45 ? 'run' : 'walk');
+
+            // Fallback procedural animation if offline
+            if (!glbHero) {
+              const walkCycle = Math.sin(elapsed * 14);
+              fallbackHeroRig.leftLegPivot.rotation.x = walkCycle * 0.58;
+              fallbackHeroRig.rightLegPivot.rotation.x = -walkCycle * 0.58;
+              fallbackHeroRig.leftArmPivot.rotation.x = -walkCycle * 0.42;
+              fallbackHeroRig.bodyGroup.position.y = Math.abs(Math.cos(elapsed * 14)) * 0.045;
+              fallbackHeroRig.capeMesh.rotation.x = 0.48 + Math.sin(elapsed * 11) * 0.14;
+              fallbackHeroRig.scarfMesh.rotation.x = 0.62 + Math.cos(elapsed * 13) * 0.18;
+            }
           } else {
-            heroRig.leftLeg.rotation.x = THREE.MathUtils.damp(heroRig.leftLeg.rotation.x, 0, 12, dt);
-            heroRig.rightLeg.rotation.x = THREE.MathUtils.damp(
-              heroRig.rightLeg.rotation.x,
-              0,
-              12,
-              dt
-            );
-            heroRig.leftArm.rotation.x = THREE.MathUtils.damp(heroRig.leftArm.rotation.x, 0, 12, dt);
-            heroRig.capeMesh.rotation.x = 0.22 + Math.sin(elapsed * 3) * 0.05;
+            glbHero?.setAnimState('idle');
+
+            if (!glbHero) {
+              fallbackHeroRig.leftLegPivot.rotation.x = THREE.MathUtils.damp(
+                fallbackHeroRig.leftLegPivot.rotation.x,
+                0,
+                12,
+                dt
+              );
+              fallbackHeroRig.rightLegPivot.rotation.x = THREE.MathUtils.damp(
+                fallbackHeroRig.rightLegPivot.rotation.x,
+                0,
+                12,
+                dt
+              );
+              fallbackHeroRig.leftArmPivot.rotation.x = THREE.MathUtils.damp(
+                fallbackHeroRig.leftArmPivot.rotation.x,
+                0,
+                12,
+                dt
+              );
+              fallbackHeroRig.bodyGroup.position.y = Math.sin(elapsed * 2.6) * 0.025;
+              fallbackHeroRig.capeMesh.rotation.x = 0.24 + Math.sin(elapsed * 3) * 0.06;
+              fallbackHeroRig.scarfMesh.rotation.x = 0.34 + Math.cos(elapsed * 3.6) * 0.08;
+            }
           }
         }
 
         // Clamp hero inside circular Rune Arena
-        const heroDist = Math.hypot(heroRig.root.position.x, heroRig.root.position.z);
+        const heroDist = Math.hypot(heroAnchor.position.x, heroAnchor.position.z);
         if (heroDist > ARENA_RADIUS - 0.7) {
           const clampScale = (ARENA_RADIUS - 0.7) / heroDist;
-          heroRig.root.position.x *= clampScale;
-          heroRig.root.position.z *= clampScale;
+          heroAnchor.position.x *= clampScale;
+          heroAnchor.position.z *= clampScale;
         }
 
-        // 3-Hit Sword Swing Animation
-        if (g.attackAnimTimer > 0) {
+        // 3-Hit Sword Swing Animation (Both 3rd-Person Bone Swing & 1st-Person Cyber-Arm Slash!)
+        let attackProgress = 0;
+        const isAttacking = g.attackAnimTimer > 0;
+        if (isAttacking) {
           g.attackAnimTimer = Math.max(0, g.attackAnimTimer - dt);
-          const progress = 1 - g.attackAnimTimer / g.attackAnimDuration;
-          if (g.comboStep === 1) {
-            heroRig.weaponPivot.rotation.y = THREE.MathUtils.lerp(-1.4, 1.5, progress);
-            heroRig.weaponPivot.rotation.x = 0.4;
-          } else if (g.comboStep === 2) {
-            heroRig.weaponPivot.rotation.y = THREE.MathUtils.lerp(1.5, -1.5, progress);
-            heroRig.weaponPivot.rotation.x = 0.1;
-          } else {
-            heroRig.weaponPivot.rotation.y = progress * Math.PI * 2;
-            heroRig.weaponPivot.rotation.x = Math.sin(progress * Math.PI) * 1.1;
+          attackProgress = 1 - g.attackAnimTimer / g.attackAnimDuration;
+
+          if (!glbHero) {
+            if (g.comboStep === 1) {
+              fallbackHeroRig.weaponPivot.rotation.y = THREE.MathUtils.lerp(-1.45, 1.55, attackProgress);
+              fallbackHeroRig.weaponPivot.rotation.x = 0.42;
+            } else if (g.comboStep === 2) {
+              fallbackHeroRig.weaponPivot.rotation.y = THREE.MathUtils.lerp(1.55, -1.55, attackProgress);
+              fallbackHeroRig.weaponPivot.rotation.x = 0.12;
+            } else {
+              fallbackHeroRig.weaponPivot.rotation.y = attackProgress * Math.PI * 2;
+              fallbackHeroRig.weaponPivot.rotation.x = Math.sin(attackProgress * Math.PI) * 1.15;
+            }
           }
 
-          slashArcMat.opacity = Math.max(0, (1 - progress) * 0.9);
+          // First-Person ViewModel Dynamic Slash Choreography
+          if (g.comboStep === 1) {
+            fpViewModel.armPivot.position.set(
+              THREE.MathUtils.lerp(0.45, -0.32, attackProgress),
+              THREE.MathUtils.lerp(-0.22, -0.44, attackProgress),
+              -0.56 - Math.sin(attackProgress * Math.PI) * 0.14
+            );
+            fpViewModel.swordPivot.rotation.set(
+              THREE.MathUtils.lerp(-0.2, -1.25, attackProgress),
+              THREE.MathUtils.lerp(0.15, 1.45, attackProgress),
+              THREE.MathUtils.lerp(-0.2, 1.35, attackProgress)
+            );
+          } else if (g.comboStep === 2) {
+            fpViewModel.armPivot.position.set(
+              THREE.MathUtils.lerp(-0.3, 0.42, attackProgress),
+              THREE.MathUtils.lerp(-0.34, -0.24, attackProgress),
+              -0.56 - Math.sin(attackProgress * Math.PI) * 0.16
+            );
+            fpViewModel.swordPivot.rotation.set(
+              THREE.MathUtils.lerp(-0.9, -0.25, attackProgress),
+              THREE.MathUtils.lerp(1.3, -0.9, attackProgress),
+              THREE.MathUtils.lerp(1.3, -0.85, attackProgress)
+            );
+          } else {
+            fpViewModel.armPivot.position.set(
+              0.28 - Math.sin(attackProgress * Math.PI) * 0.25,
+              -0.28 + Math.sin(attackProgress * Math.PI) * 0.14,
+              -0.52 - Math.sin(attackProgress * Math.PI) * 0.26
+            );
+            fpViewModel.swordPivot.rotation.set(
+              -0.8 - Math.sin(attackProgress * Math.PI) * 0.85,
+              attackProgress * Math.PI * 2.2,
+              0.85
+            );
+          }
+
+          slashArcMat.opacity = Math.max(0, (1 - attackProgress) * 0.92);
           if (g.attackAnimTimer === 0) {
             slashArcMesh.visible = false;
             if (g.attackBuffered && g.attackCooldownTimer === 0) {
@@ -1552,22 +1968,69 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
             }
           }
         } else {
-          heroRig.weaponPivot.rotation.y = THREE.MathUtils.damp(
-            heroRig.weaponPivot.rotation.y,
-            0,
+          if (!glbHero) {
+            fallbackHeroRig.weaponPivot.rotation.y = THREE.MathUtils.damp(
+              fallbackHeroRig.weaponPivot.rotation.y,
+              0,
+              12,
+              dt
+            );
+            fallbackHeroRig.weaponPivot.rotation.x = THREE.MathUtils.damp(
+              fallbackHeroRig.weaponPivot.rotation.x,
+              0,
+              12,
+              dt
+            );
+          }
+
+          // First-Person ViewModel Idle Breathing / Sprint Bob
+          const bobX = isMoving ? Math.cos(elapsed * 10) * 0.025 : Math.cos(elapsed * 2) * 0.006;
+          const bobY = isMoving
+            ? Math.abs(Math.sin(elapsed * 10)) * 0.028
+            : Math.sin(elapsed * 2.4) * 0.008;
+          fpViewModel.armPivot.position.x = THREE.MathUtils.damp(
+            fpViewModel.armPivot.position.x,
+            0.36 + bobX,
             12,
-            dt
+            rawDt
           );
-          heroRig.weaponPivot.rotation.x = THREE.MathUtils.damp(
-            heroRig.weaponPivot.rotation.x,
-            0,
+          fpViewModel.armPivot.position.y = THREE.MathUtils.damp(
+            fpViewModel.armPivot.position.y,
+            -0.34 + bobY,
             12,
-            dt
+            rawDt
           );
+          fpViewModel.armPivot.position.z = THREE.MathUtils.damp(
+            fpViewModel.armPivot.position.z,
+            -0.58,
+            12,
+            rawDt
+          );
+          fpViewModel.swordPivot.rotation.x = THREE.MathUtils.damp(
+            fpViewModel.swordPivot.rotation.x,
+            -0.34,
+            12,
+            rawDt
+          );
+          fpViewModel.swordPivot.rotation.y = THREE.MathUtils.damp(
+            fpViewModel.swordPivot.rotation.y,
+            0.24,
+            12,
+            rawDt
+          );
+          fpViewModel.swordPivot.rotation.z = THREE.MathUtils.damp(
+            fpViewModel.swordPivot.rotation.z,
+            0.36,
+            12,
+            rawDt
+          );
+
           if (g.attackBuffered && g.attackCooldownTimer === 0) {
             executeSwordAttack();
           }
         }
+
+        glbHero?.update(dt, isAttacking, g.comboStep, attackProgress);
 
         // Cosmic Nova Dome Expansion
         if (novaAnimTimer > 0) {
@@ -1583,18 +2046,21 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         if (healAuraTimer > 0) {
           healAuraTimer = Math.max(0, healAuraTimer - dt);
           const hp = 1 - healAuraTimer / 0.35;
-          healAuraMesh.position.set(heroRig.root.position.x, 0.14, heroRig.root.position.z);
+          healAuraMesh.position.set(heroAnchor.position.x, 0.14, heroAnchor.position.z);
           healAuraMesh.scale.setScalar(0.8 + hp * 1.6);
           healAuraMat.opacity = (1 - hp) * 0.9;
           if (healAuraTimer === 0) healAuraMesh.visible = false;
         }
 
-        // Enemy AI Update
+        // Enemy AI + Visible Attack Windup & Swing Animation + Skeletal Animation Update
         const flameStacks = g.upgrades.get('crimson-flame') ?? 0;
+        let anyEnemyDied = false;
         for (const enemy of enemies) {
-          if (enemy.hp <= 0) continue;
+          if (enemy.hp <= 0) {
+            anyEnemyDied = true;
+            continue;
+          }
 
-          // Crimson Flame Blade burn damage-over-time
           if (enemy.burnTimer > 0) {
             enemy.burnTimer -= dt;
             enemy.burnTickTimer += dt;
@@ -1603,145 +2069,314 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
               const burnDmg = 18 * Math.max(1, flameStacks);
               enemy.hp = Math.max(0, enemy.hp - burnDmg);
               spawnBurstParticles(
-                enemy.rig.root.position.x,
+                enemy.root.position.x,
                 1.2,
-                enemy.rig.root.position.z,
+                enemy.root.position.z,
                 0xff4500,
                 4
               );
               pushFloatingNumber(
-                enemy.rig.root.position.x,
+                enemy.root.position.x,
                 2.0,
-                enemy.rig.root.position.z,
+                enemy.root.position.z,
                 `-${burnDmg} BURN`,
                 '#FF6B35'
               );
               if (enemy.hp <= 0) {
+                anyEnemyDied = true;
                 g.kills += 1;
-                g.score += 120;
-                scene.remove(enemy.rig.root);
+                g.lastKillX = enemy.root.position.x;
+                g.lastKillZ = enemy.root.position.z;
+                g.score += 130;
+                disposeEnemy(enemy);
                 if (enemy.kind === 'boss') bossTelegraphMesh.visible = false;
                 continue;
               }
             }
           }
 
-          // Hit flash visual scale bounce
           if (enemy.hitFlash > 0) {
             enemy.hitFlash = Math.max(0, enemy.hitFlash - dt);
             const bounce = 1 + (enemy.hitFlash / 0.14) * 0.12;
-            enemy.rig.bodyGroup.scale.setScalar(bounce);
+            enemy.root.scale.setScalar(bounce);
           } else {
-            enemy.rig.bodyGroup.scale.setScalar(1);
+            enemy.root.scale.setScalar(1);
           }
 
-          if (enemy.rig.ringMesh) {
-            enemy.rig.ringMesh.rotation.z += dt * 2.1;
-          }
-
-          const dx = heroRig.root.position.x - enemy.rig.root.position.x;
-          const dz = heroRig.root.position.z - enemy.rig.root.position.z;
+          const dx = heroAnchor.position.x - enemy.root.position.x;
+          const dz = heroAnchor.position.z - enemy.root.position.z;
           const dist = Math.hypot(dx, dz) || 1;
-          enemy.rig.root.rotation.y = Math.atan2(dx, dz);
+          enemy.root.rotation.y = Math.atan2(dx, dz);
 
-          if (enemy.kind === 'knight') {
-            if (dist > 1.75) {
-              enemy.rig.root.position.x += (dx / dist) * enemy.speed * dt;
-              enemy.rig.root.position.z += (dz / dist) * enemy.speed * dt;
+          let enemyMoving = false;
+          let enemyAttackProgress = 0;
+
+          // Advance active melee / cast swing timer
+          if (enemy.attackState === 'swinging') {
+            enemy.attackAnimTimer = Math.max(0, enemy.attackAnimTimer - dt);
+            enemyAttackProgress = 1 - enemy.attackAnimTimer / Math.max(0.01, enemy.attackAnimDuration);
+            if (enemy.attackAnimTimer === 0) {
+              enemy.attackState = 'idle';
+            }
+          }
+
+          if (enemy.kind === 'stalker') {
+            if (enemy.attackState === 'idle' && dist > 1.75) {
+              enemyMoving = true;
+              enemy.root.position.x += (dx / dist) * enemy.speed * dt;
+              enemy.root.position.z += (dz / dist) * enemy.speed * dt;
+              if (enemy.fallbackRig) {
+                const stride = Math.sin(elapsed * 17 + enemy.id);
+                if (enemy.fallbackRig.leftLegPivot) enemy.fallbackRig.leftLegPivot.rotation.x = stride * 0.65;
+                if (enemy.fallbackRig.rightLegPivot) enemy.fallbackRig.rightLegPivot.rotation.x = -stride * 0.65;
+              }
             }
             enemy.attackCooldown -= dt;
-            if (dist <= 2.15 && enemy.attackCooldown <= 0) {
-              enemy.attackCooldown = 1.25;
-              enemy.rig.weaponPivot.rotation.x = 1.2;
-              if (g.invulnTimer <= 0) {
-                g.hp = Math.max(0, g.hp - 12);
-                g.invulnTimer = 0.45;
-                g.cameraShake = 0.28;
+            if (enemy.attackState === 'idle' && dist <= 2.35 && enemy.attackCooldown <= 0) {
+              enemy.attackState = 'swinging';
+              enemy.attackAnimDuration = 0.42;
+              enemy.attackAnimTimer = 0.42;
+              enemy.attackImpactDone = false;
+              enemy.attackCooldown = 1.05;
+              spawnBurstParticles(enemy.root.position.x, 1.5, enemy.root.position.z, 0xff1e42, 3);
+            }
+            if (
+              enemy.attackState === 'swinging' &&
+              enemyAttackProgress >= 0.5 &&
+              !enemy.attackImpactDone
+            ) {
+              enemy.attackImpactDone = true;
+              audio.playSwordSwing(1);
+              spawnEnemySlashArc(
+                enemy.root.position.x,
+                enemy.root.position.z,
+                enemy.root.rotation.y,
+                0.8,
+                0xff1e42
+              );
+              if (dist <= 2.75 && g.invulnTimer <= 0) {
+                g.hp = Math.max(0, g.hp - 11);
+                g.invulnTimer = 0.42;
+                g.cameraShake = 0.26;
                 audio.playPlayerHurt();
                 pushFloatingNumber(
-                  heroRig.root.position.x,
-                  2.3,
-                  heroRig.root.position.z,
-                  '-12',
+                  heroAnchor.position.x,
+                  2.2,
+                  heroAnchor.position.z,
+                  '-11',
                   '#FF1E42'
                 );
               }
-            } else {
-              enemy.rig.weaponPivot.rotation.x = THREE.MathUtils.damp(
-                enemy.rig.weaponPivot.rotation.x,
-                0,
-                8,
-                dt
-              );
             }
-          } else if (enemy.kind === 'mage') {
-            if (dist > 10.5) {
-              enemy.rig.root.position.x += (dx / dist) * enemy.speed * dt;
-              enemy.rig.root.position.z += (dz / dist) * enemy.speed * dt;
-            } else if (dist < 6.0) {
-              enemy.rig.root.position.x -= (dx / dist) * enemy.speed * 0.7 * dt;
-              enemy.rig.root.position.z -= (dz / dist) * enemy.speed * 0.7 * dt;
+            if (enemy.fallbackRig) {
+              if (enemy.attackState === 'swinging') {
+                const swingRot =
+                  enemyAttackProgress < 0.38
+                    ? THREE.MathUtils.lerp(0, -1.35, enemyAttackProgress / 0.38)
+                    : THREE.MathUtils.lerp(-1.35, 1.35, (enemyAttackProgress - 0.38) / 0.62);
+                enemy.fallbackRig.weaponPivot.rotation.x = swingRot;
+                if (enemy.fallbackRig.offhandPivot) {
+                  enemy.fallbackRig.offhandPivot.rotation.x = -swingRot * 0.85;
+                }
+              } else {
+                enemy.fallbackRig.weaponPivot.rotation.x = THREE.MathUtils.damp(
+                  enemy.fallbackRig.weaponPivot.rotation.x,
+                  0,
+                  10,
+                  dt
+                );
+              }
             }
-            enemy.rig.bodyGroup.position.y = Math.sin(elapsed * 3 + enemy.id) * 0.18;
-
+            enemy.glb?.setAnimState(enemyMoving ? 'run' : 'idle');
+          } else if (enemy.kind === 'juggernaut') {
+            if (enemy.attackState === 'idle' && dist > 2.15) {
+              enemyMoving = true;
+              enemy.root.position.x += (dx / dist) * enemy.speed * dt;
+              enemy.root.position.z += (dz / dist) * enemy.speed * dt;
+              if (enemy.fallbackRig) {
+                const stride = Math.sin(elapsed * 8 + enemy.id);
+                if (enemy.fallbackRig.leftLegPivot) enemy.fallbackRig.leftLegPivot.rotation.x = stride * 0.42;
+                if (enemy.fallbackRig.rightLegPivot) enemy.fallbackRig.rightLegPivot.rotation.x = -stride * 0.42;
+              }
+            }
             enemy.attackCooldown -= dt;
-            if (enemy.attackCooldown <= 0) {
+            if (enemy.attackState === 'idle' && dist <= 2.75 && enemy.attackCooldown <= 0) {
+              enemy.attackState = 'swinging';
+              enemy.attackAnimDuration = 0.56;
+              enemy.attackAnimTimer = 0.56;
+              enemy.attackImpactDone = false;
+              enemy.attackCooldown = 1.75;
+              spawnBurstParticles(enemy.root.position.x, 1.8, enemy.root.position.z, 0xff4500, 4);
+            }
+            if (
+              enemy.attackState === 'swinging' &&
+              enemyAttackProgress >= 0.54 &&
+              !enemy.attackImpactDone
+            ) {
+              enemy.attackImpactDone = true;
+              audio.playSwordSwing(3);
+              spawnEnemySlashArc(
+                enemy.root.position.x,
+                enemy.root.position.z,
+                enemy.root.rotation.y,
+                1.05,
+                0xff4500
+              );
+              if (dist <= 3.15 && g.invulnTimer <= 0) {
+                g.hp = Math.max(0, g.hp - 18);
+                g.invulnTimer = 0.52;
+                g.cameraShake = 0.4;
+                audio.playPlayerHurt();
+                pushFloatingNumber(
+                  heroAnchor.position.x,
+                  2.3,
+                  heroAnchor.position.z,
+                  '-18 HEAVY',
+                  '#FF4500'
+                );
+              }
+            }
+            if (enemy.fallbackRig) {
+              if (enemy.attackState === 'swinging') {
+                const swingRot =
+                  enemyAttackProgress < 0.4
+                    ? THREE.MathUtils.lerp(0, -1.5, enemyAttackProgress / 0.4)
+                    : THREE.MathUtils.lerp(-1.5, 1.45, (enemyAttackProgress - 0.4) / 0.6);
+                enemy.fallbackRig.weaponPivot.rotation.x = swingRot;
+              } else {
+                enemy.fallbackRig.weaponPivot.rotation.x = THREE.MathUtils.damp(
+                  enemy.fallbackRig.weaponPivot.rotation.x,
+                  0,
+                  7,
+                  dt
+                );
+              }
+            }
+            enemy.glb?.setAnimState(enemyMoving ? 'walk' : 'idle');
+          } else if (enemy.kind === 'mage') {
+            if (enemy.attackState === 'idle') {
+              if (dist > 10.5) {
+                enemyMoving = true;
+                enemy.root.position.x += (dx / dist) * enemy.speed * dt;
+                enemy.root.position.z += (dz / dist) * enemy.speed * dt;
+              } else if (dist < 6.0) {
+                enemyMoving = true;
+                enemy.root.position.x -= (dx / dist) * enemy.speed * 0.7 * dt;
+                enemy.root.position.z -= (dz / dist) * enemy.speed * 0.7 * dt;
+              }
+            }
+            enemy.attackCooldown -= dt;
+            if (enemy.attackState === 'idle' && enemy.attackCooldown <= 0) {
+              enemy.attackState = 'swinging';
+              enemy.attackAnimDuration = 0.46;
+              enemy.attackAnimTimer = 0.46;
+              enemy.attackImpactDone = false;
               enemy.attackCooldown = 2.4;
+            }
+            if (
+              enemy.attackState === 'swinging' &&
+              enemyAttackProgress >= 0.48 &&
+              !enemy.attackImpactDone
+            ) {
+              enemy.attackImpactDone = true;
               spawnMageProjectile(
-                enemy.rig.root.position.x,
-                enemy.rig.root.position.z,
+                enemy.root.position.x,
+                enemy.root.position.z,
                 (dx / dist) * 8.6,
                 (dz / dist) * 8.6
               );
             }
+            enemy.glb?.setAnimState(enemyMoving ? 'walk' : 'idle');
           } else if (enemy.kind === 'boss') {
             if (enemy.slamState === 'idle') {
-              if (dist > 2.8) {
-                enemy.rig.root.position.x += (dx / dist) * enemy.speed * dt;
-                enemy.rig.root.position.z += (dz / dist) * enemy.speed * dt;
+              if (enemy.attackState === 'idle' && dist > 2.85) {
+                enemyMoving = true;
+                enemy.root.position.x += (dx / dist) * enemy.speed * dt;
+                enemy.root.position.z += (dz / dist) * enemy.speed * dt;
+                if (enemy.fallbackRig) {
+                  const stride = Math.sin(elapsed * 7.5);
+                  if (enemy.fallbackRig.leftLegPivot) enemy.fallbackRig.leftLegPivot.rotation.x = stride * 0.45;
+                  if (enemy.fallbackRig.rightLegPivot) enemy.fallbackRig.rightLegPivot.rotation.x = -stride * 0.45;
+                }
               }
               enemy.attackCooldown -= dt;
-              if (enemy.attackCooldown <= 0) {
-                if (dist < 7.5) {
+              if (enemy.attackState === 'idle' && enemy.attackCooldown <= 0) {
+                if (dist <= 3.7) {
+                  enemy.attackState = 'swinging';
+                  enemy.attackAnimDuration = 0.54;
+                  enemy.attackAnimTimer = 0.54;
+                  enemy.attackImpactDone = false;
+                  enemy.attackCooldown = 1.9;
+                  spawnBurstParticles(enemy.root.position.x, 2.4, enemy.root.position.z, 0xff1e42, 6);
+                } else if (dist < 8.5) {
                   enemy.slamState = 'telegraph';
                   enemy.slamTimer = 1.25;
-                  enemy.slamTargetX = heroRig.root.position.x;
-                  enemy.slamTargetZ = heroRig.root.position.z;
+                  enemy.slamTargetX = heroAnchor.position.x;
+                  enemy.slamTargetZ = heroAnchor.position.z;
                   bossTelegraphMesh.position.set(enemy.slamTargetX, 0.05, enemy.slamTargetZ);
                   bossTelegraphMesh.scale.setScalar(0.4);
                   bossTelegraphMesh.visible = true;
                 } else {
-                  enemy.attackCooldown = 1.2;
+                  enemy.attackCooldown = 1.1;
                 }
               }
+              if (
+                enemy.attackState === 'swinging' &&
+                enemyAttackProgress >= 0.52 &&
+                !enemy.attackImpactDone
+              ) {
+                enemy.attackImpactDone = true;
+                audio.playSwordSwing(3);
+                spawnEnemySlashArc(
+                  enemy.root.position.x,
+                  enemy.root.position.z,
+                  enemy.root.rotation.y,
+                  1.45,
+                  0xff1e42
+                );
+                if (dist <= 4.15 && g.invulnTimer <= 0) {
+                  g.hp = Math.max(0, g.hp - 22);
+                  g.invulnTimer = 0.55;
+                  g.cameraShake = 0.48;
+                  audio.playPlayerHurt();
+                  pushFloatingNumber(
+                    heroAnchor.position.x,
+                    2.4,
+                    heroAnchor.position.z,
+                    '-22 CLEAVE!',
+                    '#FF1E42'
+                  );
+                }
+              }
+              enemy.glb?.setAnimState(enemyMoving ? 'walk' : 'idle');
             } else {
               enemy.slamTimer -= dt;
-              enemy.rig.bodyGroup.position.y = Math.sin((1.25 - enemy.slamTimer) * 2.5) * 0.9;
+              enemy.root.position.y = Math.sin((1.25 - enemy.slamTimer) * 2.5) * 0.9;
               const s = 0.4 + (1 - Math.max(0, enemy.slamTimer) / 1.25) * 0.65;
               bossTelegraphMesh.scale.setScalar(s);
 
               if (enemy.slamTimer <= 0) {
                 enemy.slamState = 'idle';
                 enemy.slamTimer = 0;
-                enemy.attackCooldown = 2.8;
-                enemy.rig.bodyGroup.position.y = 0;
+                enemy.attackCooldown = 2.5;
+                enemy.root.position.y = 0;
                 bossTelegraphMesh.visible = false;
                 audio.playBossSlam();
                 g.cameraShake = 0.65;
                 spawnBurstParticles(enemy.slamTargetX, 0.4, enemy.slamTargetZ, 0xff1e42, 20);
 
                 const hitDist = Math.hypot(
-                  heroRig.root.position.x - enemy.slamTargetX,
-                  heroRig.root.position.z - enemy.slamTargetZ
+                  heroAnchor.position.x - enemy.slamTargetX,
+                  heroAnchor.position.z - enemy.slamTargetZ
                 );
                 if (hitDist <= 4.7 && g.invulnTimer <= 0) {
                   g.hp = Math.max(0, g.hp - 28);
                   g.invulnTimer = 0.65;
                   audio.playPlayerHurt();
                   pushFloatingNumber(
-                    heroRig.root.position.x,
-                    2.5,
-                    heroRig.root.position.z,
+                    heroAnchor.position.x,
+                    2.4,
+                    heroAnchor.position.z,
                     '-28 SLAM!',
                     '#FF1E42'
                   );
@@ -1751,14 +2386,41 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
           }
 
           // Clamp enemies inside arena
-          const eDist = Math.hypot(enemy.rig.root.position.x, enemy.rig.root.position.z);
+          const eDist = Math.hypot(enemy.root.position.x, enemy.root.position.z);
           if (eDist > ARENA_RADIUS - 0.8) {
             const s = (ARENA_RADIUS - 0.8) / eDist;
-            enemy.rig.root.position.x *= s;
-            enemy.rig.root.position.z *= s;
+            enemy.root.position.x *= s;
+            enemy.root.position.z *= s;
+          }
+
+          enemy.glb?.update(
+            dt,
+            elapsed,
+            enemy.attackState === 'swinging',
+            enemyAttackProgress,
+            enemy.kind
+          );
+          if (enemy.fallbackRig) {
+            if (enemy.fallbackRig.ringMesh) enemy.fallbackRig.ringMesh.rotation.z += dt * 2.1;
+            if (enemy.fallbackRig.shoulderCrystals) {
+              enemy.fallbackRig.shoulderCrystals.position.y = 3.72 + Math.sin(elapsed * 3.4) * 0.14;
+              enemy.fallbackRig.shoulderCrystals.rotation.y += dt * 1.4;
+            }
           }
         }
-        enemies = enemies.filter((e) => e.hp > 0);
+        if (anyEnemyDied) {
+          enemies = enemies.filter((e) => e.hp > 0);
+        }
+
+        // Update Pooled Enemy Slash Arcs
+        for (let i = 0; i < ENEMY_SLASH_POOL_SIZE; i++) {
+          const s = enemySlashPool[i];
+          if (s.life <= 0) continue;
+          s.life = Math.max(0, s.life - dt);
+          s.mat.opacity = (s.life / 0.22) * 0.9;
+          s.mesh.rotation.y += dt * 7;
+          if (s.life === 0) s.mesh.visible = false;
+        }
 
         // Update Pooled Void Projectiles
         for (let i = 0; i < PROJECTILE_POOL_SIZE; i++) {
@@ -1770,8 +2432,8 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
           p.mesh.position.set(p.x, 1.35, p.z);
 
           const distToHero = Math.hypot(
-            p.x - heroRig.root.position.x,
-            p.z - heroRig.root.position.z
+            p.x - heroAnchor.position.x,
+            p.z - heroAnchor.position.z
           );
           if (distToHero < 0.9) {
             if (g.invulnTimer <= 0) {
@@ -1780,9 +2442,9 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
               g.cameraShake = 0.24;
               audio.playPlayerHurt();
               pushFloatingNumber(
-                heroRig.root.position.x,
+                heroAnchor.position.x,
                 2.2,
-                heroRig.root.position.z,
+                heroAnchor.position.z,
                 `-${p.damage}`,
                 '#FF1E42'
               );
@@ -1797,16 +2459,21 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
           }
         }
 
-        // Check Player Defeat or Wave Clear
+        // Check Player Defeat or Wave Clear Slow-Motion Kill-Cam
         if (g.hp <= 0) {
           finishMatch(false);
-        } else if (enemies.length === 0) {
-          if (g.wave === 5 && !g.endlessMode) {
-            finishMatch(true);
-          } else {
-            g.waveTransitionTimer += dt;
-            if (g.waveTransitionTimer >= 0.45) {
-              g.waveTransitionTimer = 0;
+        } else if (g.waveState === 'ACTIVE' && enemies.length === 0) {
+          g.waveState = 'CLEARED_SLOWMO';
+          g.waveClearTimer = 1.45;
+          g.bannerText = `WAVE ${g.wave} CLEARED!`;
+          g.bannerTimer = 1.45;
+          audio.playWaveClear();
+        } else if (g.waveState === 'CLEARED_SLOWMO') {
+          g.waveClearTimer -= rawDt;
+          if (g.waveClearTimer <= 0) {
+            if (g.wave === 3 && !g.endlessMode) {
+              finishMatch(true);
+            } else {
               audio.playVictoryChime();
               const shuffled = [...UPGRADE_POOL].sort(() => Math.random() - 0.5).slice(0, 3);
               setUpgradeChoices(shuffled);
@@ -1815,21 +2482,29 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
           }
         }
       } else {
-        heroRig.capeMesh.rotation.x = 0.22 + Math.sin(elapsed * 2.5) * 0.06;
+        // Title / Upgrade / Pause subtle idle animation
+        glbHero?.setAnimState('idle');
+        glbHero?.update(rawDt, false, 1, 0);
+        if (!glbHero) {
+          fallbackHeroRig.capeMesh.rotation.x = 0.24 + Math.sin(elapsed * 2.5) * 0.06;
+          fallbackHeroRig.scarfMesh.rotation.x = 0.34 + Math.cos(elapsed * 2.8) * 0.08;
+        }
       }
 
       // Update Pooled Instanced Burst Particles
+      const particleDt =
+        phaseRef.current === 'PLAYING' && g.waveState === 'CLEARED_SLOWMO' ? rawDt * 0.25 : rawDt;
       let particlesDirty = false;
       for (let i = 0; i < PARTICLE_POOL_SIZE; i++) {
         const p = particlePool[i];
         if (!p.active) continue;
         particlesDirty = true;
-        p.life -= rawDt;
+        p.life -= particleDt;
         if (p.life > 0) {
-          p.vy -= 14 * rawDt;
-          p.x += p.vx * rawDt;
-          p.y = Math.max(0.08, p.y + p.vy * rawDt);
-          p.z += p.vz * rawDt;
+          p.vy -= 14 * particleDt;
+          p.x += p.vx * particleDt;
+          p.y = Math.max(0.08, p.y + p.vy * particleDt);
+          p.z += p.vz * particleDt;
           _dummy.position.set(p.x, p.y, p.z);
           _dummy.rotation.set(0, 0, 0);
           _dummy.scale.setScalar(Math.max(0.1, p.life / p.maxLife));
@@ -1861,8 +2536,8 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
             for (const enemy of enemies) {
               if (enemy.hp <= 0) continue;
               const d = Math.hypot(
-                enemy.rig.root.position.x - gh.x,
-                enemy.rig.root.position.z - gh.z
+                enemy.root.position.x - gh.x,
+                enemy.root.position.z - gh.z
               );
               if (d <= 3.1 + enemy.radius) {
                 damageEnemy(enemy, cloneDmg, 0.45, '#C084FC', false);
@@ -1888,70 +2563,158 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         }
       }
 
-      // Smooth Third-Person Camera Follow + Damped Shake
+      // === CAMERA SYSTEM: Over-the-Shoulder 3RD-Person & First-Person POV (Zero Top-Down!) ===
       if (g.cameraShake > 0) {
         g.cameraShake = Math.max(0, g.cameraShake - rawDt * 2.4);
       }
-      const shakeX = (Math.random() - 0.5) * g.cameraShake;
-      const shakeY = (Math.random() - 0.5) * g.cameraShake;
+      const shakeX = (Math.random() - 0.5) * g.cameraShake * 0.45;
+      const shakeY = (Math.random() - 0.5) * g.cameraShake * 0.45;
 
-      _v1.set(heroRig.root.position.x + shakeX, 11.4 + shakeY, heroRig.root.position.z + 12.2);
-      camera.position.lerp(_v1, 1 - Math.exp(-8 * rawDt));
-      _v2.set(heroRig.root.position.x, 1.3, heroRig.root.position.z - 0.6);
-      camera.lookAt(_v2);
+      const yaw = inputRef.current.cameraYaw;
+      const pitch = inputRef.current.cameraPitch;
+      const camFwdX = -Math.sin(yaw);
+      const camFwdZ = -Math.cos(yaw);
+      const camRightX = Math.cos(yaw);
+      const camRightZ = -Math.sin(yaw);
+
+      if (phaseRef.current === 'TITLE_MENU') {
+        // Dramatic low-angle showcase behind hero looking across arena
+        const idleYaw = Math.sin(elapsed * 0.28) * 0.25;
+        const rX = Math.cos(idleYaw);
+        const rZ = -Math.sin(idleYaw);
+        const fX = -Math.sin(idleYaw);
+        const fZ = -Math.cos(idleYaw);
+        _camTargetPos.set(
+          heroAnchor.position.x + rX * 0.7 - fX * 4.2,
+          2.1,
+          heroAnchor.position.z + rZ * 0.7 - fZ * 4.2
+        );
+        camera.position.lerp(_camTargetPos, 1 - Math.exp(-6 * rawDt));
+        _camLookTarget.set(
+          heroAnchor.position.x + fX * 7,
+          1.55,
+          heroAnchor.position.z + fZ * 7
+        );
+        camera.lookAt(_camLookTarget);
+      } else if (phaseRef.current === 'PLAYING' && g.waveState === 'CLEARED_SLOWMO') {
+        // Kill-cam dramatic over-the-shoulder zoom toward final defeated enemy
+        const focusX = THREE.MathUtils.lerp(heroAnchor.position.x, g.lastKillX, 0.4);
+        const focusZ = THREE.MathUtils.lerp(heroAnchor.position.z, g.lastKillZ, 0.4);
+        _camTargetPos.set(
+          focusX + camRightX * 1.1 - camFwdX * 3.8 + shakeX,
+          2.2 + shakeY,
+          focusZ + camRightZ * 1.1 - camFwdZ * 3.8
+        );
+        camera.position.lerp(_camTargetPos, 1 - Math.exp(-7 * rawDt));
+        _camLookTarget.set(focusX, 1.35, focusZ);
+        camera.lookAt(_camLookTarget);
+      } else if (isFirstPerson) {
+        // True First-Person POV at warrior eye level (y = 1.68)
+        camera.position.set(
+          heroAnchor.position.x + shakeX * 0.4,
+          1.68 + shakeY * 0.4,
+          heroAnchor.position.z
+        );
+        const cosP = Math.cos(pitch);
+        _camLookTarget.set(
+          camera.position.x + camFwdX * cosP * 10,
+          camera.position.y - Math.sin(pitch) * 10,
+          camera.position.z + camFwdZ * cosP * 10
+        );
+        camera.lookAt(_camLookTarget);
+      } else {
+        // Close Over-the-Shoulder Third-Person Action Camera: offset (0.7, 2.1, 4.2) rotated by look yaw/pitch
+        const verticalOffset = 2.1 + Math.sin(pitch) * 1.35;
+        const backDist = 4.2 * Math.cos(pitch * 0.45);
+        _camTargetPos.set(
+          heroAnchor.position.x + camRightX * 0.7 - camFwdX * backDist + shakeX,
+          Math.max(1.15, verticalOffset) + shakeY,
+          heroAnchor.position.z + camRightZ * 0.7 - camFwdZ * backDist
+        );
+        camera.position.lerp(_camTargetPos, 1 - Math.exp(-14 * rawDt));
+
+        // Eye-level forward target across the arena
+        _camLookTarget.set(
+          heroAnchor.position.x + camRightX * 0.35 + camFwdX * 11,
+          Math.max(0.6, 1.55 - Math.sin(pitch) * 4.5),
+          heroAnchor.position.z + camRightZ * 0.35 + camFwdZ * 11
+        );
+        camera.lookAt(_camLookTarget);
+      }
+
+      // Billboard all enemy head health bars toward active camera
+      for (let i = 0; i < enemies.length; i++) {
+        const e = enemies[i];
+        if (e.glb) {
+          e.glb.updateHealthBar(e.hp, e.maxHp, camera.quaternion);
+        } else if (e.fallbackBar) {
+          const ratio = Math.max(0.001, Math.min(1, e.hp / Math.max(1, e.maxHp)));
+          e.fallbackBar.fill.scale.x = ratio;
+          e.fallbackBar.group.quaternion.copy(camera.quaternion);
+        }
+      }
 
       renderer.render(scene, camera);
 
-      // Sync React HUD + Projected Floating Damage Numbers (~15Hz)
+      // Sync React HUD + Projected Floating Damage Numbers (~14Hz, zero empty re-renders)
       hudSyncAccum += rawDt;
-      if (hudSyncAccum >= 0.065) {
+      if (hudSyncAccum >= 0.072) {
         hudSyncAccum = 0;
 
-        const boss = enemies.find((e) => e.kind === 'boss');
-        setHudState({
-          hp: Math.ceil(g.hp),
-          maxHp: g.maxHp,
-          novaEnergy: Math.floor(g.novaEnergy),
-          wave: g.wave,
-          score: g.score,
-          combo: g.combo,
-          maxCombo: g.maxCombo,
-          kills: g.kills,
-          dashCharges: g.dashCharges,
-          maxDashCharges: g.maxDashCharges,
-          dashProgress:
-            g.dashCharges < g.maxDashCharges
-              ? Math.min(1, g.dashRechargeTimer / g.dashCooldownDuration)
-              : 1,
-          bossHp: boss ? Math.ceil(boss.hp) : 0,
-          bossMaxHp: boss ? boss.maxHp : 0,
-          bossName: boss ? 'VOID TITAN · WAVE 5 OVERLORD' : '',
-          bannerText: g.bannerText,
-        });
-
-        const mountW = mount.clientWidth || 960;
-        const mountH = mount.clientHeight || 540;
-        const nextFloats: FloatingDmg[] = [];
-        for (let i = floatingQueue.length - 1; i >= 0; i--) {
-          const item = floatingQueue[i];
-          item.ttl -= 0.065;
-          item.worldPos.y += 0.14;
-          if (item.ttl <= 0) {
-            floatingQueue.splice(i, 1);
-            continue;
-          }
-          _projVec.copy(item.worldPos).project(camera);
-          if (_projVec.z < 1) {
-            nextFloats.push({
-              id: item.id,
-              x: ((_projVec.x + 1) * 0.5) * mountW,
-              y: ((-_projVec.y + 1) * 0.5) * mountH,
-              text: item.text,
-              color: item.color,
-            });
-          }
+        if (phaseRef.current === 'PLAYING') {
+          const boss = enemies.find((e) => e.kind === 'boss');
+          setHudState({
+            hp: Math.ceil(g.hp),
+            maxHp: g.maxHp,
+            novaEnergy: Math.floor(g.novaEnergy),
+            wave: g.wave,
+            waveState: g.waveState,
+            waveCountdown: g.waveCountdown,
+            enemiesRemaining: enemies.length,
+            waveTotalEnemies: g.waveTotalEnemies,
+            score: g.score,
+            combo: g.combo,
+            maxCombo: g.maxCombo,
+            kills: g.kills,
+            dashCharges: g.dashCharges,
+            maxDashCharges: g.maxDashCharges,
+            dashProgress:
+              g.dashCharges < g.maxDashCharges
+                ? Math.min(1, g.dashRechargeTimer / g.dashCooldownDuration)
+                : 1,
+            bossHp: boss ? Math.ceil(boss.hp) : 0,
+            bossMaxHp: boss ? boss.maxHp : 0,
+            bossName: boss ? `CHRONO BOSS · WAVE ${g.wave} OVERLORD` : '',
+            bannerText: g.bannerText,
+          });
         }
-        setFloatingNumbers(nextFloats);
+
+        if (floatingQueue.length > 0 || hadFloatingLastSync) {
+          const mountW = mount.clientWidth || 960;
+          const mountH = mount.clientHeight || 540;
+          const nextFloats: FloatingDmg[] = [];
+          for (let i = floatingQueue.length - 1; i >= 0; i--) {
+            const item = floatingQueue[i];
+            item.ttl -= 0.072;
+            item.worldPos.y += 0.14;
+            if (item.ttl <= 0) {
+              floatingQueue.splice(i, 1);
+              continue;
+            }
+            _projVec.copy(item.worldPos).project(camera);
+            if (_projVec.z < 1) {
+              nextFloats.push({
+                id: item.id,
+                x: ((_projVec.x + 1) * 0.5) * mountW,
+                y: ((-_projVec.y + 1) * 0.5) * mountH,
+                text: item.text,
+                color: item.color,
+              });
+            }
+          }
+          hadFloatingLastSync = nextFloats.length > 0;
+          setFloatingNumbers(nextFloats);
+        }
       }
 
       if (isSoftwareGl) {
@@ -1976,9 +2739,10 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       window.removeEventListener('orientationchange', handleResize);
 
       clearDynamicEntities();
-      enemyFactory.dispose();
+      glbHero?.dispose();
+      fpViewModel.dispose();
+      fallbackEnemyFactory.dispose();
 
-      // Strictly dispose all WebGL geometries, materials, and textures in scene
       const disposedGeos = new Set<THREE.BufferGeometry>();
       const disposedMats = new Set<THREE.Material>();
       scene.traverse((obj) => {
@@ -2001,7 +2765,8 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         }
       });
 
-      arenaTex.dispose();
+      arenaTextures.map.dispose();
+      arenaTextures.roughnessMap.dispose();
       envTex.dispose();
       renderer.dispose();
       if (renderer.domElement.parentNode === mount) {
@@ -2010,7 +2775,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     };
   }, [domainCheck.authorized, finishMatch, isMuted, setSyncedPhase]);
 
-  // Keyboard bindings (WASD + Space/J Attack + Shift/K Dash + Q/E/L Cosmic Nova + P Pause)
+  // Keyboard bindings (WASD + Q/E or Arrow/Drag Look + Space/J Attack + Shift/K Dash + F/L Cosmic Nova + V View + P Pause)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       inputRef.current.keys.add(e.code);
@@ -2028,6 +2793,10 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         if (phaseRef.current === 'PLAYING') {
           e.preventDefault();
           inputRef.current.novaRequested = true;
+        }
+      } else if (e.code === 'KeyV') {
+        if (phaseRef.current === 'PLAYING') {
+          toggleCameraView();
         }
       } else if (e.code === 'KeyP') {
         if (phaseRef.current === 'PLAYING') setSyncedPhase('PAUSED');
@@ -2047,7 +2816,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [onToggleMute, setSyncedPhase]);
+  }, [onToggleMute, setSyncedPhase, toggleCameraView]);
 
   const handleSelectUpgrade = (card: UpgradeCard) => {
     const g = gameRef.current;
@@ -2067,7 +2836,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     setAcquiredUpgrades(
       Array.from(g.upgrades.entries()).map(([id, count]) => ({ id, count }))
     );
-    engineActionsRef.current?.spawnWave(g.wave + 1);
+    engineActionsRef.current?.beginWaveIncoming(g.wave + 1);
     setSyncedPhase('PLAYING');
   };
 
@@ -2077,11 +2846,11 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     g.reportedSession = false;
     g.hp = Math.min(g.maxHp, g.hp + 60);
     setSessionRewards(null);
-    engineActionsRef.current?.spawnWave(g.wave + 1);
+    engineActionsRef.current?.beginWaveIncoming(g.wave + 1);
     setSyncedPhase('PLAYING');
   };
 
-  // Virtual Joystick Pointer Handlers (multi-touch safe)
+  // Virtual Joystick Pointer Handlers (Enlarged 164px outer ring, multi-touch safe)
   const handleJoystickDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -2095,7 +2864,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
   };
 
   const updateJoystick = (clientX: number, clientY: number, cx: number, cy: number) => {
-    const maxR = 54;
+    const maxR = 62;
     const screenDx = clientX - cx;
     const screenDy = clientY - cy;
 
@@ -2108,7 +2877,6 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         mount.clientWidth > mount.clientHeight
     );
 
-    // Remap physical portrait touch deltas into local rotated landscape coordinates (rotate(90deg))
     const rawDx = isCssRotated ? screenDy : screenDx;
     const rawDy = isCssRotated ? -screenDx : screenDy;
 
@@ -2140,6 +2908,55 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
     setJoyVisual({ active: false, dx: 0, dy: 0 });
   };
 
+  // Right-Screen / Arena Touch-Drag Camera Look Handlers (Horizontal & Vertical)
+  const handleCanvasLookDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (phaseRef.current !== 'PLAYING') return;
+    if (inputRef.current.lookPointerId !== null) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    inputRef.current.lookPointerId = e.pointerId;
+    inputRef.current.lookLastX = e.clientX;
+    inputRef.current.lookLastY = e.clientY;
+    inputRef.current.lookMovedDist = 0;
+  };
+
+  const handleCanvasLookMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (inputRef.current.lookPointerId !== e.pointerId) return;
+    const screenDx = e.clientX - inputRef.current.lookLastX;
+    const screenDy = e.clientY - inputRef.current.lookLastY;
+    inputRef.current.lookLastX = e.clientX;
+    inputRef.current.lookLastY = e.clientY;
+
+    const mount = canvasMountRef.current;
+    const mountRect = mount?.getBoundingClientRect();
+    const isCssRotated = Boolean(
+      mount &&
+        mountRect &&
+        mountRect.width < mountRect.height &&
+        mount.clientWidth > mount.clientHeight
+    );
+
+    const dx = isCssRotated ? screenDy : screenDx;
+    const dy = isCssRotated ? -screenDx : screenDy;
+
+    inputRef.current.lookMovedDist += Math.hypot(dx, dy);
+    inputRef.current.cameraYaw -= dx * 0.0065;
+    const minPitch = cameraModeRef.current === '1ST' ? -0.45 : -0.22;
+    const maxPitch = cameraModeRef.current === '1ST' ? 0.52 : 0.48;
+    inputRef.current.cameraPitch = Math.max(
+      minPitch,
+      Math.min(maxPitch, inputRef.current.cameraPitch + dy * 0.0045)
+    );
+  };
+
+  const handleCanvasLookUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (inputRef.current.lookPointerId !== e.pointerId) return;
+    const wasShortTap = inputRef.current.lookMovedDist < 10;
+    inputRef.current.lookPointerId = null;
+    if (wasShortTap && phaseRef.current === 'PLAYING') {
+      inputRef.current.attackRequested = true;
+    }
+  };
+
   if (!domainCheck.authorized) {
     return (
       <div className="w-full h-full flex items-center justify-center bg-[#07070F] p-6 text-center">
@@ -2161,16 +2978,33 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
       className="relative w-full h-full bg-[#07070F] select-none overflow-hidden"
       onContextMenu={(e) => e.preventDefault()}
     >
-      {/* Isolated WebGL Canvas Mount */}
+      {/* Isolated WebGL Canvas Mount with Touch-Drag Look & Tap Slash */}
       <div
         ref={canvasMountRef}
-        onPointerDown={() => {
-          if (phaseRef.current === 'PLAYING') {
-            inputRef.current.attackRequested = true;
-          }
-        }}
+        onPointerDown={handleCanvasLookDown}
+        onPointerMove={handleCanvasLookMove}
+        onPointerUp={handleCanvasLookUp}
+        onPointerCancel={handleCanvasLookUp}
         className="w-full h-full cursor-crosshair touch-none"
       />
+
+      {/* Loading 3D Warrior Models Progress Overlay */}
+      {modelLoading.active && (
+        <div className="pointer-events-none absolute top-16 left-1/2 -translate-x-1/2 z-40 rounded-xl bg-[#07070F]/92 border border-[#00F0FF]/55 px-5 py-3 shadow-2xl min-w-[260px] text-center">
+          <div className="font-display text-xs font-bold tracking-wider text-[#00F0FF] uppercase">
+            {modelLoading.label}
+          </div>
+          <div className="mt-2 h-2 w-full rounded-full bg-[#120B24] overflow-hidden border border-white/10">
+            <div
+              className="h-full bg-gradient-to-r from-[#00F0FF] to-[#FF1E42] transition-all duration-200"
+              style={{ width: `${modelLoading.percent}%` }}
+            />
+          </div>
+          <div className="mt-1 font-mono-nums text-[11px] font-bold text-slate-300">
+            {modelLoading.percent}%
+          </div>
+        </div>
+      )}
 
       {/* Projected Floating Damage Numbers */}
       <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
@@ -2188,10 +3022,17 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         ))}
       </div>
 
+      {/* First-Person Crosshair Dot */}
+      {phase === 'PLAYING' && cameraMode === '1ST' && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+          <div className="w-3 h-3 rounded-full border-2 border-[#00F0FF] bg-[#FF1E42]/70" />
+        </div>
+      )}
+
       {/* Top Combat HUD (No backdrop-blur over WebGL per Three.js performance guidelines) */}
-      <div className="pointer-events-none absolute top-0 inset-x-0 z-20 p-3 sm:p-4 flex items-start justify-between gap-3">
-        {/* Left: HP & Cosmic Nova Energy */}
-        <div className="w-44 sm:w-60 rounded-xl bg-[#07070F]/85 border border-white/12 p-2.5 sm:p-3">
+      <div className="pointer-events-none absolute top-0 inset-x-0 z-20 p-2.5 sm:p-4 flex items-start justify-between gap-2.5">
+        {/* Left: HP, Cosmic Nova Energy & Active Relics */}
+        <div className="w-40 sm:w-60 rounded-xl bg-[#07070F]/88 border border-white/15 p-2.5 sm:p-3">
           <div className="flex items-center justify-between text-[11px] font-mono-nums">
             <span className="inline-flex items-center gap-1 font-semibold text-white">
               <Heart className="w-3.5 h-3.5 text-[#FF1E42] fill-[#FF1E42]" />
@@ -2217,7 +3058,6 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
             />
           </div>
 
-          {/* Active Unlocked Power-Up Icons under HP/Nova Bar */}
           {acquiredUpgrades.length > 0 && (
             <div
               aria-label="Active Roguelike Powers"
@@ -2253,17 +3093,49 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
           )}
         </div>
 
-        {/* Center: Wave 5 Boss Health Bar OR Wave Announcement */}
-        <div className="flex-1 max-w-md flex flex-col items-center">
+        {/* Center: Persistent Wave & Enemies Remaining HUD + Dedicated Chrono Boss Health Bar */}
+        <div className="flex-1 max-w-md flex flex-col items-center gap-2">
+          <div className="rounded-xl bg-[#07070F]/88 border border-white/15 px-3 sm:px-4 py-1.5 flex items-center gap-2.5 sm:gap-4 shadow-lg">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                Wave
+              </span>
+              <span className="font-display text-sm sm:text-base font-black text-[#00F0FF]">
+                {hudState.wave}
+              </span>
+            </div>
+
+            <div className="h-4 w-px bg-white/15" />
+
+            <div className="flex items-center gap-1.5 font-mono-nums">
+              <Skull className="w-3.5 h-3.5 text-[#FF1E42]" />
+              <span className="text-[11px] sm:text-xs font-bold text-white">
+                {hudState.enemiesRemaining}
+                <span className="text-slate-400">
+                  /{Math.max(hudState.waveTotalEnemies, hudState.enemiesRemaining)}
+                </span>
+              </span>
+            </div>
+
+            {hudState.combo > 1 && (
+              <>
+                <div className="h-4 w-px bg-white/15" />
+                <div className="font-mono-nums text-[11px] sm:text-xs font-black text-amber-300">
+                  {hudState.combo}x
+                </div>
+              </>
+            )}
+          </div>
+
           {hudState.bossMaxHp > 0 && (
-            <div className="w-full rounded-xl bg-[#07070F]/90 border border-[#FF1E42]/60 px-3.5 py-2">
+            <div className="w-full rounded-xl bg-[#07070F]/92 border border-[#FF1E42]/70 px-3.5 py-2 shadow-[0_0_24px_rgba(255,30,66,0.28)]">
               <div className="flex items-center justify-between text-[10px] sm:text-xs font-display font-bold text-[#FF1E42]">
-                <span>{hudState.bossName}</span>
+                <span className="tracking-wider">{hudState.bossName}</span>
                 <span className="font-mono-nums text-white">
                   {hudState.bossHp}/{hudState.bossMaxHp}
                 </span>
               </div>
-              <div className="mt-1.5 h-2.5 rounded-full bg-[#120B24] overflow-hidden">
+              <div className="mt-1.5 h-2.5 rounded-full bg-[#120B24] overflow-hidden border border-white/10">
                 <div
                   className="h-full bg-gradient-to-r from-[#FF1E42] via-[#dc2626] to-[#f97316] transition-all duration-150"
                   style={{
@@ -2274,16 +3146,30 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
             </div>
           )}
 
-          {hudState.bannerText && (
-            <div className="mt-2 rounded-lg bg-[#120B24]/95 border border-[#00F0FF]/50 px-4 py-1.5 font-display text-xs sm:text-sm font-extrabold tracking-wider text-white">
+          {hudState.bannerText && hudState.waveState === 'ACTIVE' && (
+            <div className="rounded-lg bg-[#120B24]/95 border border-[#00F0FF]/55 px-4 py-1 font-display text-xs sm:text-sm font-extrabold tracking-wider text-white">
               {hudState.bannerText}
             </div>
           )}
         </div>
 
-        {/* Right: Score, Combo, Mute & Pause */}
+        {/* Right: VIEW 3RD / 1ST Toggle, Score, Mute & Pause */}
         <div className="pointer-events-auto flex items-center gap-2">
-          <div className="rounded-xl bg-[#07070F]/85 border border-white/12 px-3 py-1.5 text-right">
+          <button
+            type="button"
+            onClick={toggleCameraView}
+            aria-label="Toggle 3rd Person or 1st Person Camera"
+            className={`min-h-[46px] px-3.5 sm:px-4 py-2 rounded-xl border-2 font-display text-xs sm:text-sm font-black tracking-wide inline-flex items-center gap-1.5 cursor-pointer transition ${
+              cameraMode === '1ST'
+                ? 'bg-[#FF1E42] border-white/70 text-white shadow-lg shadow-[#FF1E42]/35'
+                : 'bg-[#07070F]/92 border-[#00F0FF] text-[#00F0FF] shadow-lg shadow-[#00F0FF]/25'
+            }`}
+          >
+            <Eye className="w-4 h-4 shrink-0" />
+            <span className="whitespace-nowrap">VIEW: {cameraMode}</span>
+          </button>
+
+          <div className="hidden sm:block rounded-xl bg-[#07070F]/88 border border-white/15 px-3 py-1.5 text-right">
             <div className="font-mono-nums text-sm sm:text-base font-bold text-white leading-tight">
               {hudState.score.toLocaleString()}
             </div>
@@ -2296,9 +3182,9 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
             type="button"
             onClick={onToggleMute}
             aria-label={isMuted ? 'Unmute Sound' : 'Mute Sound'}
-            className="min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg bg-[#07070F]/85 border border-white/12 text-slate-200 hover:border-[#00F0FF] cursor-pointer"
+            className="min-w-[46px] min-h-[46px] flex items-center justify-center rounded-xl bg-[#07070F]/88 border border-white/15 text-slate-200 hover:border-[#00F0FF] cursor-pointer"
           >
-            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
           </button>
 
           {phase === 'PLAYING' && (
@@ -2306,50 +3192,96 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
               type="button"
               onClick={() => setSyncedPhase('PAUSED')}
               aria-label="Pause Chrono Slayer 3D"
-              className="min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg bg-[#07070F]/85 border border-white/12 text-slate-200 hover:border-[#FF1E42] cursor-pointer"
+              className="min-w-[46px] min-h-[46px] flex items-center justify-center rounded-xl bg-[#07070F]/88 border border-white/15 text-slate-200 hover:border-[#FF1E42] cursor-pointer"
             >
-              <Pause className="w-4 h-4" />
+              <Pause className="w-5 h-5" />
             </button>
           )}
         </div>
       </div>
 
+      {/* Center-Screen Wave Incoming & Wave Cleared Announcements */}
+      {phase === 'PLAYING' && hudState.waveState === 'INCOMING' && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center p-4">
+          <div
+            className={`rounded-2xl px-7 py-5 border-2 text-center shadow-2xl ${
+              hudState.wave % 3 === 0
+                ? 'bg-[#1a0714]/92 border-[#FF1E42] shadow-[0_0_40px_rgba(255,30,66,0.45)]'
+                : 'bg-[#090d1f]/92 border-[#00F0FF] shadow-[0_0_40px_rgba(0,240,255,0.35)]'
+            }`}
+          >
+            <div
+              className={`font-display text-xs sm:text-sm font-bold tracking-[0.25em] uppercase ${
+                hudState.wave % 3 === 0 ? 'text-[#FF1E42]' : 'text-[#00F0FF]'
+              }`}
+            >
+              {hudState.wave % 3 === 0 ? 'Chrono Overlord Approaching' : 'Arena Breach Detected'}
+            </div>
+            <div className="mt-1 font-display text-2xl sm:text-4xl font-black tracking-wider text-white">
+              WAVE {hudState.wave} — INCOMING!
+            </div>
+            <div className="mt-3 inline-flex items-center gap-2 rounded-xl bg-[#07070F] border border-white/15 px-4 py-1.5 font-mono-nums text-lg sm:text-2xl font-black text-white">
+              <span className="text-xs uppercase tracking-widest text-slate-400">Spawning in</span>
+              <span className={hudState.wave % 3 === 0 ? 'text-[#FF1E42]' : 'text-[#00F0FF]'}>
+                {Math.max(1, Math.ceil(hudState.waveCountdown))}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {phase === 'PLAYING' && hudState.waveState === 'CLEARED_SLOWMO' && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center p-4">
+          <div className="rounded-2xl bg-[#0a1428]/92 border-2 border-[#00F0FF] px-8 py-5 text-center shadow-[0_0_45px_rgba(0,240,255,0.45)]">
+            <div className="font-display text-xs sm:text-sm font-bold tracking-[0.28em] uppercase text-emerald-400">
+              All Hostiles Eliminated
+            </div>
+            <div className="mt-1 font-display text-2xl sm:text-4xl font-black tracking-wider text-white">
+              WAVE {hudState.wave} CLEARED!
+            </div>
+            <div className="mt-2 text-xs font-semibold text-[#00F0FF]">
+              {hudState.wave === 3 ? 'Chrono Boss Vanquished!' : 'Preparing Roguelike Relic Draft...'}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Subtle Copyright Corner Watermark */}
-      <div className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 z-10 text-[10px] text-slate-400/80 whitespace-nowrap">
+      <div className="pointer-events-none absolute bottom-1.5 left-1/2 -translate-x-1/2 z-10 text-[10px] text-slate-400/80 whitespace-nowrap">
         © 2026 Shadow Knight Game Zone. All Rights Reserved.
       </div>
 
-      {/* Free Fire / BGMI Style 16:9 Landscape Touch & Combat Controls */}
+      {/* Extra-Large Mobile Touch Controls (172px Joystick, 116-132px SLASH, 88-98px DASH & POWER) */}
       {phase === 'PLAYING' && (
         <>
-          {/* Bottom-Left: Enlarged 144px (w-36 h-36) Virtual Joystick with Wide Touch-Capture Zone */}
+          {/* Bottom-Left: Extra-Large 172px Virtual Joystick */}
           <div
             onPointerDown={handleJoystickDown}
             onPointerMove={handleJoystickMove}
             onPointerUp={handleJoystickUp}
             onPointerCancel={handleJoystickUp}
             aria-label="360 Movement Joystick"
-            className="absolute bottom-2 left-2 z-20 w-44 h-44 flex items-center justify-center touch-none cursor-grab active:cursor-grabbing"
+            className="absolute bottom-1.5 left-1.5 z-20 w-52 h-52 flex items-center justify-center touch-none cursor-grab active:cursor-grabbing"
           >
-            <div className="relative w-36 h-36 rounded-full bg-[#120B24]/72 border-2 border-[#00F0FF]/55 shadow-[0_0_24px_rgba(0,240,255,0.22)] flex items-center justify-center pointer-events-none">
-              <div className="w-16 h-16 rounded-full border border-white/20" />
+            <div className="relative w-[172px] h-[172px] rounded-full bg-[#120B24]/75 border-2 border-[#00F0FF]/65 shadow-[0_0_24px_rgba(0,240,255,0.28)] flex items-center justify-center pointer-events-none">
+              <div className="w-[76px] h-[76px] rounded-full border border-white/25" />
               <div
                 style={{
                   transform: `translate3d(${joyVisual.dx}px, ${joyVisual.dy}px, 0)`,
                 }}
-                className="absolute w-16 h-16 rounded-full bg-gradient-to-br from-[#00F0FF] via-[#38bdf8] to-[#2563eb] border-2 border-white shadow-[0_0_20px_rgba(0,240,255,0.85)]"
+                className="absolute w-[68px] h-[68px] rounded-full bg-gradient-to-br from-[#00F0FF] via-[#38bdf8] to-[#2563eb] border-2 border-white shadow-[0_0_20px_rgba(0,240,255,0.9)] will-change-transform"
               />
             </div>
           </div>
 
-          {/* PC Hint Bar (subtle, bottom-center above copyright) */}
-          <div className="pointer-events-none hidden md:block absolute bottom-7 left-1/2 -translate-x-1/2 z-10 text-[11px] text-slate-400 bg-[#07070F]/75 px-3 py-1 rounded-md border border-white/10">
-            WASD Move · Space / Click Attack (3-Hit) · Shift Dash · Q Cosmic Nova
+          {/* PC Controls Hint */}
+          <div className="pointer-events-none hidden md:block absolute bottom-7 left-1/2 -translate-x-1/2 z-10 text-[11px] text-slate-300 bg-[#07070F]/85 px-3.5 py-1.5 rounded-lg border border-white/12 whitespace-nowrap">
+            Drag to Look · WASD Move · Space/Click Slash · Shift Dash · Q Power · V View (3rd/1st)
           </div>
 
-          {/* Bottom-Right: Ergonomic Attack, Dash & Cosmic Nova Buttons */}
-          <div className="absolute bottom-5 right-5 z-20 flex items-end gap-3 touch-none">
-            {/* Cosmic Nova Ultimate Button */}
+          {/* Bottom-Right: Extra-Large SLASH (116-132px), DASH (88-98px), POWER (88-98px) */}
+          <div className="absolute bottom-3.5 right-3.5 z-20 flex items-end gap-3.5 sm:gap-4 touch-none">
+            {/* ULT / POWER Button */}
             <button
               type="button"
               disabled={hudState.novaEnergy < 100}
@@ -2357,17 +3289,19 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
                 e.stopPropagation();
                 engineActionsRef.current?.triggerNova();
               }}
-              className={`min-w-[58px] min-h-[58px] sm:min-w-[66px] sm:min-h-[66px] rounded-full border-2 flex flex-col items-center justify-center text-[10px] font-display font-bold transition ${
+              className={`w-[88px] h-[88px] sm:w-[98px] sm:h-[98px] rounded-full border-[3px] flex flex-col items-center justify-center text-xs font-display font-black transition-transform active:scale-90 ${
                 hudState.novaEnergy >= 100
-                  ? 'bg-gradient-to-br from-[#a855f7] to-[#FF1E42] border-[#00F0FF] text-white shadow-lg shadow-[#FF1E42]/40 scale-105 cursor-pointer'
-                  : 'bg-[#120B24]/85 border-white/15 text-slate-400 opacity-75 cursor-not-allowed'
+                  ? 'bg-gradient-to-br from-[#a855f7] to-[#FF1E42] border-[#00F0FF] text-white shadow-xl shadow-[#FF1E42]/45 scale-105 cursor-pointer'
+                  : 'bg-[#120B24]/90 border-white/25 text-slate-300 opacity-90 cursor-not-allowed'
               }`}
             >
-              <Sparkles className="w-5 h-5" />
-              <span className="mt-0.5">NOVA</span>
+              <Sparkles className="w-7 h-7" />
+              <span className="mt-1 leading-none">
+                {hudState.novaEnergy >= 100 ? 'POWER!' : `${hudState.novaEnergy}%`}
+              </span>
             </button>
 
-            {/* Invincible Dash Button */}
+            {/* DASH Button */}
             <button
               type="button"
               disabled={hudState.dashCharges <= 0}
@@ -2375,27 +3309,27 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
                 e.stopPropagation();
                 engineActionsRef.current?.triggerDash();
               }}
-              className={`relative min-w-[60px] min-h-[60px] sm:min-w-[68px] sm:min-h-[68px] rounded-full border-2 flex flex-col items-center justify-center text-[10px] font-display font-bold transition ${
+              className={`relative w-[88px] h-[88px] sm:w-[98px] sm:h-[98px] rounded-full border-[3px] flex flex-col items-center justify-center text-xs font-display font-black transition-transform active:scale-90 ${
                 hudState.dashCharges > 0
-                  ? 'bg-[#120B24]/90 border-[#00F0FF] text-[#00F0FF] active:scale-95 cursor-pointer'
-                  : 'bg-[#120B24]/70 border-white/15 text-slate-500 cursor-not-allowed'
+                  ? 'bg-[#120B24]/95 border-[#00F0FF] text-[#00F0FF] shadow-lg shadow-[#00F0FF]/30 cursor-pointer'
+                  : 'bg-[#120B24]/75 border-white/15 text-slate-500 cursor-not-allowed'
               }`}
             >
-              <Wind className="w-5 h-5" />
-              <span className="mt-0.5">DASH {hudState.dashCharges}</span>
+              <Wind className="w-7 h-7" />
+              <span className="mt-1 leading-none">DASH {hudState.dashCharges}</span>
             </button>
 
-            {/* Primary 3-Hit Greatsword Attack Button */}
+            {/* Primary SLASH Button */}
             <button
               type="button"
               onPointerDown={(e) => {
                 e.stopPropagation();
                 engineActionsRef.current?.triggerAttack();
               }}
-              className="min-w-[78px] min-h-[78px] sm:min-w-[88px] sm:min-h-[88px] rounded-full bg-gradient-to-br from-[#FF1E42] to-[#be123c] border-2 border-white/80 text-white shadow-xl shadow-[#FF1E42]/35 flex flex-col items-center justify-center font-display text-xs font-black active:scale-90 transition cursor-pointer"
+              className="w-[116px] h-[116px] sm:w-[132px] sm:h-[132px] rounded-full bg-gradient-to-br from-[#FF1E42] to-[#be123c] border-[4px] border-white/90 text-white shadow-2xl shadow-[#FF1E42]/55 flex flex-col items-center justify-center font-display text-base font-black active:scale-90 transition-transform cursor-pointer"
             >
-              <Sword className="w-7 h-7" />
-              <span className="mt-0.5">ATTACK</span>
+              <Sword className="w-10 h-10" />
+              <span className="mt-1 leading-none tracking-wider">SLASH</span>
             </button>
           </div>
         </>
@@ -2403,7 +3337,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
 
       {/* Title Menu Overlay */}
       {phase === 'TITLE_MENU' && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-[#07070F]/82 p-4">
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-[#07070F]/75 p-4">
           <div className="max-w-xl w-full rounded-2xl bg-[#120B24]/95 border border-white/15 p-5 sm:p-7 shadow-2xl grid grid-cols-1 sm:grid-cols-12 gap-5 items-center">
             <div className="sm:col-span-5 aspect-square rounded-xl overflow-hidden border border-[#00F0FF]/35 bg-[#07070F]">
               <img
@@ -2416,24 +3350,25 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
 
             <div className="sm:col-span-7 text-left">
               <div className="text-[11px] font-semibold text-[#00F0FF] uppercase tracking-wider">
-                3D Third-Person Action Arena
+                3D Over-the-Shoulder &amp; 1st-Person Action
               </div>
               <h2 className="mt-1 font-display text-2xl sm:text-3xl font-black text-white leading-tight">
                 CHRONO SLAYER <span className="text-[#FF1E42]">3D</span>
               </h2>
               <p className="mt-2 text-xs text-slate-300 leading-relaxed">
-                Chain 3-hit greatsword combos, dash through Void Mage bolts, draft Roguelike power
-                cards, and defeat the Wave 5 Void Titan Boss.
+                Battle with rigged 3D cyber-warriors in 3rd-Person or 1st-Person POV. Chain
+                3-hit katana combos, draft Roguelike relics, and vanquish the Chrono Boss every 3rd
+                wave.
               </p>
 
               <div className="mt-4 flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   onClick={() => engineActionsRef.current?.startNewRun()}
-                  className="min-h-[46px] inline-flex items-center gap-2 rounded-xl bg-[#FF1E42] hover:bg-[#ff3355] px-6 py-2.5 font-display text-sm font-bold text-white shadow-lg shadow-[#FF1E42]/30 transition cursor-pointer"
+                  className="min-h-[52px] inline-flex items-center gap-2.5 rounded-xl bg-[#FF1E42] hover:bg-[#ff3355] py-4 px-7 font-display text-base font-extrabold text-white shadow-xl shadow-[#FF1E42]/35 transition cursor-pointer"
                 >
-                  <Play className="w-4 h-4 fill-current" />
-                  ENTER ARENA
+                  <Play className="w-5 h-5 fill-current" />
+                  <span>PLAY NOW</span>
                 </button>
 
                 {bestScore > 0 && (
@@ -2465,10 +3400,10 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
                   key={card.id}
                   type="button"
                   onClick={() => handleSelectUpgrade(card)}
-                  className={`group rounded-xl p-4 border transition flex flex-col justify-between gap-3 cursor-pointer ${
+                  className={`group rounded-xl p-5 border-2 transition flex flex-col justify-between gap-3 cursor-pointer ${
                     card.accent === 'crimson'
-                      ? 'bg-[#1a0b1e] border-[#FF1E42]/50 hover:border-[#FF1E42] hover:bg-[#270e29]'
-                      : 'bg-[#0b1328] border-[#00F0FF]/50 hover:border-[#00F0FF] hover:bg-[#0f1d3a]'
+                      ? 'bg-[#1a0b1e] border-[#FF1E42]/55 hover:border-[#FF1E42] hover:bg-[#270e29]'
+                      : 'bg-[#0b1328] border-[#00F0FF]/55 hover:border-[#00F0FF] hover:bg-[#0f1d3a]'
                   }`}
                 >
                   <div>
@@ -2478,17 +3413,17 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
                       ) : (
                         <Zap className="w-5 h-5 text-[#00F0FF] shrink-0" />
                       )}
-                      <span className="font-display text-sm font-bold text-white">
+                      <span className="font-display text-sm sm:text-base font-bold text-white">
                         {card.title}
                       </span>
                     </div>
-                    <p className="mt-2 text-xs text-slate-300 leading-relaxed">
+                    <p className="mt-2 text-xs sm:text-sm text-slate-300 leading-relaxed">
                       {card.description}
                     </p>
                   </div>
 
                   <span
-                    className={`text-[11px] font-bold ${
+                    className={`text-xs font-extrabold ${
                       card.accent === 'crimson' ? 'text-[#FF1E42]' : 'text-[#00F0FF]'
                     }`}
                   >
@@ -2508,34 +3443,34 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-[#07070F]/85 p-4">
           <div className="max-w-sm w-full rounded-2xl bg-[#120B24] border border-white/15 p-6 text-center">
             <h3 className="font-display text-xl font-bold text-white">Combat Paused</h3>
-            <div className="mt-5 flex flex-col gap-2.5">
+            <div className="mt-5 flex flex-col gap-3">
               <button
                 type="button"
                 onClick={() => setSyncedPhase('PLAYING')}
-                className="min-h-[44px] rounded-xl bg-[#00F0FF] text-[#07070F] font-display text-sm font-bold cursor-pointer"
+                className="min-h-[50px] rounded-xl bg-[#00F0FF] text-[#07070F] py-3.5 px-6 font-display text-base font-extrabold cursor-pointer"
               >
                 Resume Battle
               </button>
               <button
                 type="button"
                 onClick={() => engineActionsRef.current?.startNewRun()}
-                className="min-h-[44px] rounded-xl bg-white/8 border border-white/12 text-white text-sm font-semibold cursor-pointer"
+                className="min-h-[48px] rounded-xl bg-white/10 border border-white/15 py-3 px-6 text-white text-sm font-bold cursor-pointer"
               >
                 Restart Run
               </button>
               <button
                 type="button"
                 onClick={onExit}
-                className="min-h-[40px] text-xs text-slate-400 hover:text-white cursor-pointer"
+                className="min-h-[46px] rounded-xl text-sm font-bold text-slate-300 hover:text-white cursor-pointer"
               >
-                Exit to Portal
+                Exit to Home
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Victory / Game Over Modal with XP/Coin Sync & WhatsApp Challenge */}
+      {/* Victory / Game Over Modal */}
       {(phase === 'GAME_OVER' || phase === 'VICTORY') && sessionRewards && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-[#07070F]/90 p-4">
           <div className="max-w-lg w-full rounded-2xl bg-[#120B24] border border-white/15 p-5 sm:p-6 shadow-2xl">
@@ -2543,7 +3478,7 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
               <div>
                 <div className="text-xs font-semibold text-[#00F0FF]">
                   {sessionRewards.victory
-                    ? 'Wave 5 Void Titan Defeated!'
+                    ? 'Wave 3 Chrono Boss Defeated!'
                     : sessionRewards.isNewBest
                     ? 'New Personal Best!'
                     : `Reached Wave ${hudState.wave}`}
@@ -2586,11 +3521,11 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
               </div>
             </div>
 
-            <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3">
               <button
                 type="button"
                 onClick={() => engineActionsRef.current?.startNewRun()}
-                className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#FF1E42] hover:bg-[#ff3355] text-white px-4 py-2.5 font-display text-xs sm:text-sm font-bold cursor-pointer transition"
+                className="min-h-[50px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#FF1E42] hover:bg-[#ff3355] text-white px-5 py-3.5 font-display text-sm font-extrabold cursor-pointer transition"
               >
                 <RotateCcw className="w-4 h-4 shrink-0" />
                 Play Again
@@ -2600,16 +3535,16 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
                 href={buildWhatsAppChallengeUrl(gameTitle, sessionRewards.score)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#16A34A] hover:bg-[#15803D] text-white px-4 py-2.5 text-xs sm:text-sm font-semibold transition"
+                className="min-h-[50px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#16A34A] hover:bg-[#15803D] text-white px-5 py-3.5 text-sm font-extrabold transition"
               >
                 <Share2 className="w-4 h-4 shrink-0" />
-                Challenge Friend on WhatsApp
+                Challenge Friend
               </a>
 
               <button
                 type="button"
                 onClick={onExit}
-                className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#07070F] hover:bg-white/10 border border-white/20 text-white px-4 py-2.5 text-xs sm:text-sm font-semibold cursor-pointer transition"
+                className="min-h-[50px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#07070F] hover:bg-white/10 border border-white/25 text-white px-5 py-3.5 text-sm font-extrabold cursor-pointer transition"
               >
                 <Home className="w-4 h-4 shrink-0 text-[#00F0FF]" />
                 Back to Home
@@ -2620,10 +3555,10 @@ export const ChronoSlayer3D: React.FC<GameComponentProps> = ({
               <button
                 type="button"
                 onClick={handleContinueEndless}
-                className="mt-2.5 w-full min-h-[42px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#00F0FF] hover:bg-[#33f3ff] text-[#07070F] px-4 py-2 font-display text-xs sm:text-sm font-bold cursor-pointer transition"
+                className="mt-3 w-full min-h-[50px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#00F0FF] hover:bg-[#33f3ff] text-[#07070F] px-6 py-3.5 font-display text-sm font-extrabold cursor-pointer transition"
               >
                 <Zap className="w-4 h-4" />
-                Continue Endless (Wave 6+)
+                Continue Endless (Wave 4+)
               </button>
             )}
 

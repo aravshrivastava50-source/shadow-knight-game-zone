@@ -1,7 +1,24 @@
-import type { GameSessionResult, LeaderboardEntry, PlayerProfile } from '../types';
+import type {
+  ArmoryPerkId,
+  ArmorySkinId,
+  GameSessionResult,
+  LeaderboardEntry,
+  PlayerProfile,
+} from '../types';
 
 const PROFILE_STORAGE_KEY = 'skgz_player_profile_v1';
 const LEADERBOARD_STORAGE_KEY = 'skgz_leaderboard_v1';
+const VALID_SKINS = new Set<ArmorySkinId>([
+  'cyber-cyan',
+  'crimson-hellfire',
+  'solar-gold',
+  'void-amethyst',
+]);
+const VALID_PERKS = new Set<ArmoryPerkId>([
+  'vital-core',
+  'chrono-battery',
+  'blade-tempering',
+]);
 
 function getTodayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
@@ -22,6 +39,9 @@ const DEFAULT_PROFILE: PlayerProfile = {
   gamesPlayed: 0,
   highScores: {},
   preRegisteredIds: [],
+  equippedSkin: 'cyber-cyan',
+  unlockedSkins: ['cyber-cyan'],
+  unlockedPerks: [],
   soundMuted: false,
 };
 
@@ -85,6 +105,28 @@ export function loadPlayerProfile(): PlayerProfile {
       streak = 1;
     }
 
+    const rawUnlockedSkins = Array.isArray(parsed.unlockedSkins)
+      ? parsed.unlockedSkins.filter((s): s is ArmorySkinId => VALID_SKINS.has(s as ArmorySkinId))
+      : [];
+    const unlockedSkins: ArmorySkinId[] = Array.from(
+      new Set<ArmorySkinId>(['cyber-cyan', ...rawUnlockedSkins])
+    );
+
+    const equippedSkin: ArmorySkinId =
+      parsed.equippedSkin && unlockedSkins.includes(parsed.equippedSkin)
+        ? parsed.equippedSkin
+        : 'cyber-cyan';
+
+    const unlockedPerks: ArmoryPerkId[] = Array.isArray(parsed.unlockedPerks)
+      ? Array.from(
+          new Set(
+            parsed.unlockedPerks.filter((p): p is ArmoryPerkId =>
+              VALID_PERKS.has(p as ArmoryPerkId)
+            )
+          )
+        )
+      : [];
+
     const normalized: PlayerProfile = {
       gamerTag:
         typeof parsed.gamerTag === 'string' && parsed.gamerTag.trim().length > 0
@@ -97,6 +139,9 @@ export function loadPlayerProfile(): PlayerProfile {
       gamesPlayed: typeof parsed.gamesPlayed === 'number' ? Math.max(0, parsed.gamesPlayed) : 0,
       highScores: parsed.highScores && typeof parsed.highScores === 'object' ? parsed.highScores : {},
       preRegisteredIds: Array.isArray(parsed.preRegisteredIds) ? parsed.preRegisteredIds : [],
+      equippedSkin,
+      unlockedSkins,
+      unlockedPerks,
       soundMuted: Boolean(parsed.soundMuted),
     };
 
@@ -205,6 +250,113 @@ export function getLevelFromXp(xp: number): {
     nextLevelXp: xpPerLevel,
     progressPercent,
   };
+}
+
+export function purchaseOrEquipSkin(
+  profile: PlayerProfile,
+  skinId: ArmorySkinId,
+  cost: number
+): { profile: PlayerProfile; changed: boolean } {
+  if (profile.unlockedSkins.includes(skinId)) {
+    if (profile.equippedSkin === skinId) {
+      return { profile, changed: false };
+    }
+    const next: PlayerProfile = { ...profile, equippedSkin: skinId };
+    savePlayerProfile(next);
+    return { profile: next, changed: true };
+  }
+  if (profile.coins < cost) {
+    return { profile, changed: false };
+  }
+  const next: PlayerProfile = {
+    ...profile,
+    coins: profile.coins - cost,
+    unlockedSkins: Array.from(new Set<ArmorySkinId>([...profile.unlockedSkins, skinId])),
+    equippedSkin: skinId,
+  };
+  savePlayerProfile(next);
+  return { profile: next, changed: true };
+}
+
+export function purchaseArmoryPerk(
+  profile: PlayerProfile,
+  perkId: ArmoryPerkId,
+  cost: number
+): { profile: PlayerProfile; changed: boolean } {
+  if (profile.unlockedPerks.includes(perkId) || profile.coins < cost) {
+    return { profile, changed: false };
+  }
+  const next: PlayerProfile = {
+    ...profile,
+    coins: profile.coins - cost,
+    unlockedPerks: Array.from(new Set<ArmoryPerkId>([...profile.unlockedPerks, perkId])),
+  };
+  savePlayerProfile(next);
+  return { profile: next, changed: true };
+}
+
+export function mergeLocalAndCloudProfile(
+  local: PlayerProfile,
+  cloud: Partial<PlayerProfile>
+): PlayerProfile {
+  const mergedScores: Record<string, number> = { ...local.highScores };
+  if (cloud.highScores && typeof cloud.highScores === 'object') {
+    for (const [gameId, score] of Object.entries(cloud.highScores)) {
+      if (typeof score === 'number' && Number.isFinite(score)) {
+        mergedScores[gameId] = Math.max(mergedScores[gameId] ?? 0, score);
+      }
+    }
+  }
+
+  const cloudSkins = Array.isArray(cloud.unlockedSkins)
+    ? cloud.unlockedSkins.filter((s): s is ArmorySkinId => VALID_SKINS.has(s as ArmorySkinId))
+    : [];
+  const unlockedSkins = Array.from(
+    new Set<ArmorySkinId>(['cyber-cyan', ...local.unlockedSkins, ...cloudSkins])
+  );
+
+  const cloudPerks = Array.isArray(cloud.unlockedPerks)
+    ? cloud.unlockedPerks.filter((p): p is ArmoryPerkId => VALID_PERKS.has(p as ArmoryPerkId))
+    : [];
+  const unlockedPerks = Array.from(
+    new Set<ArmoryPerkId>([...local.unlockedPerks, ...cloudPerks])
+  );
+
+  const preferredTag =
+    cloud.gamerTag && cloud.gamerTag !== 'ShadowKnight_01'
+      ? cloud.gamerTag
+      : local.gamerTag;
+
+  const equippedSkin =
+    cloud.equippedSkin && unlockedSkins.includes(cloud.equippedSkin)
+      ? cloud.equippedSkin
+      : local.equippedSkin;
+
+  const merged: PlayerProfile = {
+    gamerTag: preferredTag.trim().slice(0, 18) || 'ShadowKnight_01',
+    xp: Math.max(local.xp, typeof cloud.xp === 'number' ? cloud.xp : 0),
+    coins: Math.max(local.coins, typeof cloud.coins === 'number' ? cloud.coins : 0),
+    streak: Math.max(local.streak, typeof cloud.streak === 'number' ? cloud.streak : 1),
+    lastActiveDate: getTodayIsoDate(),
+    gamesPlayed: Math.max(
+      local.gamesPlayed,
+      typeof cloud.gamesPlayed === 'number' ? cloud.gamesPlayed : 0
+    ),
+    highScores: mergedScores,
+    preRegisteredIds: Array.from(
+      new Set([
+        ...local.preRegisteredIds,
+        ...(Array.isArray(cloud.preRegisteredIds) ? cloud.preRegisteredIds : []),
+      ])
+    ),
+    equippedSkin,
+    unlockedSkins,
+    unlockedPerks,
+    soundMuted: local.soundMuted,
+  };
+
+  savePlayerProfile(merged);
+  return merged;
 }
 
 export function buildWhatsAppChallengeUrl(gameTitle: string, score?: number): string {

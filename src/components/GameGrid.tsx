@@ -84,7 +84,7 @@ export const GameGrid: React.FC<GameGridProps> = ({
           <button
             type="button"
             onClick={onResetFilters}
-            className="mt-4 min-h-[42px] rounded-lg bg-[#00F0FF] text-[#07070F] px-4 py-2 text-xs font-bold hover:brightness-110 transition cursor-pointer"
+            className="mt-5 min-h-[48px] rounded-xl bg-[#00F0FF] text-[#07070F] px-7 py-3.5 text-sm font-extrabold hover:brightness-110 transition cursor-pointer"
           >
             Reset Filters
           </button>
@@ -120,17 +120,18 @@ export const GameGrid: React.FC<GameGridProps> = ({
                       src={safeThumbUrl}
                       alt={game.title}
                       loading="lazy"
+                      decoding="async"
                       referrerPolicy="no-referrer"
                       onError={() =>
                         setBrokenThumbIds((prev) => ({ ...prev, [game.id]: true }))
                       }
-                      className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+                      className="w-full h-full object-cover transform-gpu transition-transform duration-300 group-hover:scale-[1.03]"
                     />
                   ) : (
                     <GameArtwork
                       theme={game.artworkTheme}
                       title={game.title}
-                      className="transition-transform duration-300 group-hover:scale-[1.03]"
+                      className="transform-gpu transition-transform duration-300 group-hover:scale-[1.03]"
                     />
                   )}
                   <div className="absolute inset-0 bg-gradient-to-t from-[#07070F]/90 via-transparent to-transparent" />
@@ -198,19 +199,19 @@ export const GameGrid: React.FC<GameGridProps> = ({
                     </p>
                   </div>
 
-                  <div className="flex items-center justify-between gap-3 pt-2.5 border-t border-white/8">
-                    <span className="text-[11px] text-slate-400 truncate">{game.players}</span>
+                  <div className="flex items-center justify-between gap-3 pt-3 border-t border-white/8">
+                    <span className="text-xs text-slate-400 truncate">{game.players}</span>
                     <button
                       type="button"
                       onClick={() => onSelectGame(game)}
-                      className={`min-h-[42px] inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-bold transition whitespace-nowrap shrink-0 cursor-pointer ${
+                      className={`inline-flex items-center justify-center gap-2 rounded-xl py-4 px-7 text-base font-extrabold transition whitespace-nowrap shrink-0 cursor-pointer ${
                         isPlayable
-                          ? 'bg-[#FF1E42] hover:bg-[#ff3355] text-white shadow-sm shadow-[#FF1E42]/35'
-                          : 'bg-white/8 hover:bg-white/15 text-[#00F0FF] border border-[#00F0FF]/35'
+                          ? 'bg-[#FF1E42] hover:bg-[#ff3355] text-white shadow-lg shadow-[#FF1E42]/35'
+                          : 'bg-white/10 hover:bg-white/18 text-[#00F0FF] border border-[#00F0FF]/45'
                       }`}
                     >
-                      <Play className="w-3.5 h-3.5 fill-current" />
-                      <span>{isPlayable ? 'Play Now' : 'Preview'}</span>
+                      <Play className="w-4 h-4 fill-current" />
+                      <span>{isPlayable ? 'PLAY NOW' : 'Preview'}</span>
                     </button>
                   </div>
                 </div>

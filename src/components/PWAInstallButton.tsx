@@ -15,9 +15,9 @@ export const PWAInstallButton: React.FC = () => {
       <button
         type="button"
         onClick={() => void install()}
-        className="min-h-[40px] inline-flex items-center gap-2 rounded-lg border border-[#00F0FF]/45 bg-[#00F0FF]/10 px-3.5 py-2 text-xs font-semibold text-[#00F0FF] hover:bg-[#00F0FF]/20 transition whitespace-nowrap shrink-0 cursor-pointer"
+        className="min-h-[44px] inline-flex items-center gap-2 rounded-xl border border-[#00F0FF]/55 bg-[#00F0FF]/12 px-5 py-2.5 text-sm font-bold text-[#00F0FF] hover:bg-[#00F0FF]/22 transition whitespace-nowrap shrink-0 cursor-pointer"
       >
-        <Download className="w-3.5 h-3.5" />
+        <Download className="w-4 h-4" />
         <span>Install App</span>
       </button>
     );
@@ -29,9 +29,9 @@ export const PWAInstallButton: React.FC = () => {
         <button
           type="button"
           onClick={() => setShowIOSGuide(true)}
-          className="min-h-[40px] inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-xs font-medium text-slate-200 hover:border-[#00F0FF]/50 transition whitespace-nowrap shrink-0 cursor-pointer"
+          className="min-h-[44px] inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/8 px-4 py-2.5 text-sm font-bold text-slate-100 hover:border-[#00F0FF]/50 transition whitespace-nowrap shrink-0 cursor-pointer"
         >
-          <Download className="w-3.5 h-3.5 text-[#00F0FF]" />
+          <Download className="w-4 h-4 text-[#00F0FF]" />
           <span>Install</span>
         </button>
 

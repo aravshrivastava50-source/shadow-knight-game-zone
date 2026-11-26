@@ -13,7 +13,7 @@ export const GAMES_REGISTRY: GameMetadata[] = [
     title: 'Chrono Slayer 3D',
     subtitle: '3D Cyber-Blade Arena Action',
     description:
-      'Wield a dual-energy crimson & cyan greatsword in a 3D rune arena. Chain 3-hit combos, draft Roguelike power-ups, and defeat the Wave 5 Void Titan Boss.',
+      'Wield a dual-energy crimson & cyan greatsword in a 3D rune arena. Chain 3-hit combos, draft Roguelike power-ups, and conquer the Chrono Boss every 3rd wave.',
     category: '3D Action',
     status: 'playable',
     orientation: '16:9 Landscape',

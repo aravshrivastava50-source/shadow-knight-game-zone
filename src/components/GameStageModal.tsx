@@ -48,6 +48,10 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
   const [isPortraitMobile, setIsPortraitMobile] = useState(false);
   const [bypassRotatePrompt, setBypassRotatePrompt] = useState(false);
   const [forceLandscapeCSS, setForceLandscapeCSS] = useState(false);
+  const [viewportDims, setViewportDims] = useState(() => ({
+    width: typeof window !== 'undefined' ? window.visualViewport?.width || window.innerWidth : 390,
+    height: typeof window !== 'undefined' ? window.visualViewport?.height || window.innerHeight : 844,
+  }));
 
   useEffect(() => {
     if (!game) return;
@@ -58,6 +62,10 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
     const landscapeMedia = window.matchMedia('(orientation: landscape)');
 
     const syncViewportState = () => {
+      const vw = Math.round(window.visualViewport?.width || window.innerWidth);
+      const vh = Math.round(window.visualViewport?.height || window.innerHeight);
+      setViewportDims({ width: vw, height: vh });
+
       const landscapeNow = landscapeMedia.matches || isLandscapeViewport();
       const portraitMobileNow = !landscapeNow && isMobilePortraitViewport();
 
@@ -86,6 +94,7 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
     landscapeMedia.addEventListener?.('change', handleMediaChange);
     window.addEventListener('resize', syncViewportState);
     window.addEventListener('orientationchange', syncViewportState);
+    window.visualViewport?.addEventListener('resize', syncViewportState);
     document.addEventListener('fullscreenchange', syncViewportState);
 
     const handleEsc = (e: KeyboardEvent) => {
@@ -99,6 +108,7 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
       landscapeMedia.removeEventListener?.('change', handleMediaChange);
       window.removeEventListener('resize', syncViewportState);
       window.removeEventListener('orientationchange', syncViewportState);
+      window.visualViewport?.removeEventListener('resize', syncViewportState);
       document.removeEventListener('fullscreenchange', syncViewportState);
       window.removeEventListener('keydown', handleEsc);
       void exitLandscapeFullscreen();
@@ -107,8 +117,11 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
 
   useEffect(() => {
     if (!game) return;
-    triggerViewportResize();
-  }, [forceLandscapeCSS, game]);
+    const raf = window.requestAnimationFrame(() => {
+      triggerViewportResize();
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [forceLandscapeCSS, viewportDims.height, viewportDims.width, game]);
 
   if (!game) return null;
 
@@ -154,8 +167,8 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
               position: 'fixed',
               top: 0,
               left: 0,
-              width: '100vh',
-              height: '100vw',
+              width: `${viewportDims.height}px`,
+              height: `${viewportDims.width}px`,
               transform: 'rotate(90deg) translateY(-100%)',
               transformOrigin: 'top left',
             }
@@ -174,9 +187,9 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
           <button
             type="button"
             onClick={handleExitToHome}
-            className="min-h-[36px] inline-flex items-center gap-1.5 rounded-lg bg-[#FF1E42]/20 border border-[#FF1E42]/50 px-3 py-1.5 text-xs font-bold text-white hover:bg-[#FF1E42] transition whitespace-nowrap shrink-0 cursor-pointer"
+            className="min-h-[44px] inline-flex items-center gap-2 rounded-xl bg-[#FF1E42]/25 border border-[#FF1E42]/60 px-4 py-2 text-sm font-bold text-white hover:bg-[#FF1E42] transition whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <ArrowLeft className="w-3.5 h-3.5" />
+            <ArrowLeft className="w-4 h-4" />
             <span>Exit to Home</span>
           </button>
 
@@ -197,13 +210,13 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
                 setForceLandscapeCSS((prev) => !prev);
                 setBypassRotatePrompt(true);
               }}
-              className={`min-h-[36px] inline-flex items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition cursor-pointer ${
+              className={`min-h-[44px] inline-flex items-center gap-1.5 rounded-xl border px-3.5 text-xs sm:text-sm font-bold transition cursor-pointer ${
                 applyCssRotation
                   ? 'bg-[#00F0FF] border-[#00F0FF] text-[#07070F]'
-                  : 'bg-white/5 border-white/15 text-[#00F0FF] hover:border-[#00F0FF]'
+                  : 'bg-white/8 border-white/20 text-[#00F0FF] hover:border-[#00F0FF]'
               }`}
             >
-              <RotateCw className="w-3.5 h-3.5" />
+              <RotateCw className="w-4 h-4" />
               <span>{applyCssRotation ? 'Portrait' : 'Force Landscape'}</span>
             </button>
           )}
@@ -212,7 +225,7 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
             type="button"
             onClick={() => void handleToggleFullscreen()}
             aria-label={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
-            className="min-h-[36px] min-w-[36px] inline-flex items-center justify-center gap-1.5 rounded-lg bg-white/5 border border-white/10 px-2.5 text-xs font-medium text-slate-200 hover:border-[#00F0FF]/50 transition cursor-pointer"
+            className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-white/8 border border-white/15 px-3.5 text-xs sm:text-sm font-bold text-slate-100 hover:border-[#00F0FF]/50 transition cursor-pointer"
           >
             {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             <span className="hidden sm:inline">{isFullscreen ? 'Windowed' : 'Fullscreen'}</span>
@@ -233,6 +246,8 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
               gameTitle={game.title}
               bestScore={bestScore}
               isMuted={profile.soundMuted}
+              equippedSkin={profile.equippedSkin}
+              unlockedPerks={profile.unlockedPerks}
               onToggleMute={onToggleMute}
               onSessionComplete={onSessionComplete}
               onExit={handleExitToHome}
@@ -272,12 +287,12 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
                   <span>{game.players}</span>
                 </div>
 
-                <div className="mt-5 flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-2.5">
+                <div className="mt-5 flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3">
                   <button
                     type="button"
                     disabled={isPreRegistered}
                     onClick={() => onPreRegister(game.id)}
-                    className={`min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-bold transition ${
+                    className={`min-h-[50px] inline-flex items-center justify-center gap-2 rounded-xl py-4 px-7 text-base font-extrabold transition ${
                       isPreRegistered
                         ? 'bg-emerald-500/20 border border-emerald-400/50 text-emerald-300 cursor-default'
                         : 'bg-[#FF1E42] hover:bg-[#ff3355] text-white cursor-pointer'
@@ -285,12 +300,12 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
                   >
                     {isPreRegistered ? (
                       <>
-                        <CheckCircle2 className="w-4 h-4" />
+                        <CheckCircle2 className="w-5 h-5" />
                         <span>Pre-Registered (+25 XP Claimed)</span>
                       </>
                     ) : (
                       <>
-                        <Sparkles className="w-4 h-4" />
+                        <Sparkles className="w-5 h-5" />
                         <span>Pre-Register &amp; Claim +25 XP</span>
                       </>
                     )}
@@ -300,10 +315,10 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
                     <button
                       type="button"
                       onClick={() => onSwitchGame(starterGame)}
-                      className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#00F0FF] text-[#07070F] px-5 py-2.5 font-display text-xs sm:text-sm font-bold hover:brightness-110 transition cursor-pointer"
+                      className="min-h-[50px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#00F0FF] text-[#07070F] py-4 px-7 font-display text-base font-extrabold hover:brightness-110 transition cursor-pointer"
                     >
-                      <Zap className="w-4 h-4" />
-                      <span>Play {starterGame.title}</span>
+                      <Zap className="w-5 h-5" />
+                      <span>PLAY {starterGame.title}</span>
                     </button>
                   )}
                 </div>
@@ -341,18 +356,18 @@ export const GameStageModal: React.FC<GameStageModalProps> = ({
                 {game.title} is built for 16:9 Landscape Mode. Rotate your device or tap Force
                 Landscape Mode below to start immediately.
               </p>
-              <div className="mt-5 flex flex-col gap-2.5">
+              <div className="mt-5 flex flex-col gap-3">
                 <button
                   type="button"
                   onClick={() => void handleEnableLandscape()}
-                  className="min-h-[44px] w-full rounded-xl bg-[#FF1E42] text-xs font-bold text-white hover:bg-[#ff3355] transition cursor-pointer"
+                  className="min-h-[50px] w-full rounded-xl bg-[#FF1E42] py-3.5 px-6 text-base font-extrabold text-white hover:bg-[#ff3355] transition cursor-pointer"
                 >
                   Force Landscape Mode
                 </button>
                 <button
                   type="button"
                   onClick={() => setBypassRotatePrompt(true)}
-                  className="min-h-[40px] w-full rounded-xl bg-white/5 border border-white/10 text-xs font-medium text-slate-300 hover:text-white transition cursor-pointer"
+                  className="min-h-[46px] w-full rounded-xl bg-white/8 border border-white/15 py-3 px-5 text-sm font-bold text-slate-200 hover:text-white transition cursor-pointer"
                 >
                   Continue in Portrait
                 </button>

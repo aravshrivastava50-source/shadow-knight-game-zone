@@ -27,11 +27,17 @@ export interface GameSessionResult {
   coinsEarned: number;
 }
 
+export type ArmorySkinId = 'cyber-cyan' | 'crimson-hellfire' | 'solar-gold' | 'void-amethyst';
+
+export type ArmoryPerkId = 'vital-core' | 'chrono-battery' | 'blade-tempering';
+
 export interface GameComponentProps {
   gameId: string;
   gameTitle: string;
   bestScore: number;
   isMuted: boolean;
+  equippedSkin?: ArmorySkinId;
+  unlockedPerks?: ArmoryPerkId[];
   onToggleMute: () => void;
   onSessionComplete: (result: GameSessionResult) => void;
   onExit: () => void;
@@ -100,16 +106,22 @@ export interface PlayerProfile {
   gamesPlayed: number;
   highScores: Record<string, number>;
   preRegisteredIds: string[];
+  equippedSkin: ArmorySkinId;
+  unlockedSkins: ArmorySkinId[];
+  unlockedPerks: ArmoryPerkId[];
   soundMuted: boolean;
 }
 
 export interface LeaderboardEntry {
   id: string;
+  uid?: string;
   gamerTag: string;
   gameId: string;
   gameTitle: string;
   score: number;
   maxCombo: number;
+  accuracy?: number;
   recordedAt: string;
   isCurrentPlayer?: boolean;
+  isCloudVerified?: boolean;
 }

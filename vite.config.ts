@@ -20,6 +20,8 @@ export default defineConfig(() => {
           'robots.txt',
           'sitemap.xml',
           'google7a92a2ff6e65d7da.html',
+          'models/Soldier.glb',
+          'models/Xbot.glb',
         ],
         manifest: {
           id: '/',
@@ -57,9 +59,19 @@ export default defineConfig(() => {
         },
         workbox: {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,webp,woff,woff2}'],
-          navigateFallbackDenylist: [/^\/google[a-z0-9]+\.html$/i],
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,webp,woff,woff2,glb}'],
+          navigateFallbackDenylist: [
+            /^\/google[a-z0-9]+\.html$/i,
+            /^\/robots\.txt$/i,
+            /^\/sitemap\.xml$/i,
+            /^\/__\//,
+          ],
           runtimeCaching: [
+            {
+              urlPattern:
+                /^https:\/\/(?:firestore|firebasestorage|identitytoolkit|securetoken)\.googleapis\.com\/.*/i,
+              handler: 'NetworkOnly',
+            },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',

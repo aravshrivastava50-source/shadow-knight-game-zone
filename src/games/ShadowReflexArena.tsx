@@ -11,6 +11,7 @@ import {
   VolumeX,
   Zap,
 } from 'lucide-react';
+import { getArmorySkinConfig } from '../config/armory';
 import type { GameComponentProps } from '../types';
 import { buildWhatsAppChallengeUrl } from '../utils/playerStorage';
 
@@ -107,6 +108,8 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
   gameTitle,
   bestScore,
   isMuted,
+  equippedSkin = 'cyber-cyan',
+  unlockedPerks = [],
   onToggleMute,
   onSessionComplete,
   onExit,
@@ -114,11 +117,17 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
 
+  const skinConfig = getArmorySkinConfig(equippedSkin);
+  const hasVitalCore = unlockedPerks.includes('vital-core');
+  const hasChronoBattery = unlockedPerks.includes('chrono-battery');
+  const hasBladeTempering = unlockedPerks.includes('blade-tempering');
+  const maxShields = hasVitalCore ? 4 : 3;
+
   const [gameState, setGameState] = useState<GameState>('TITLE_MENU');
   const [difficulty, setDifficulty] = useState<Difficulty>('knight');
   const [hudScore, setHudScore] = useState(0);
   const [hudCombo, setHudCombo] = useState(1);
-  const [hudShields, setHudShields] = useState(3);
+  const [hudShields, setHudShields] = useState(maxShields);
   const [hudTimeLeft, setHudTimeLeft] = useState(ROUND_DURATION);
   const [summaryStats, setSummaryStats] = useState<{
     score: number;
@@ -291,7 +300,7 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
         score: 0,
         combo: 1,
         maxCombo: 1,
-        shields: 3,
+        shields: maxShields,
         bonusCoins: 0,
         hits: 0,
         clicks: 0,
@@ -303,7 +312,7 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
       };
       setHudScore(0);
       setHudCombo(1);
-      setHudShields(3);
+      setHudShields(maxShields);
       setHudTimeLeft(ROUND_DURATION);
       setSummaryStats(null);
       spawnTarget(selectedDifficulty);
@@ -311,7 +320,7 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
       playSynthTone(520, 0.14, 'triangle', 0.14, 780);
       setGameState('PLAYING');
     },
-    [difficulty, playSynthTone, spawnTarget]
+    [difficulty, maxShields, playSynthTone, spawnTarget]
   );
 
   // Keyboard shortcuts while inside arena
@@ -490,18 +499,21 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
       ctx.arc(LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2 + 16, 130, 0, Math.PI * 2);
       ctx.stroke();
 
-      // Render pointer slash trail
+      // Render pointer slash trail (tinted by equipped Armory skin)
       if (s.trail.length > 1) {
         for (let i = 1; i < s.trail.length; i++) {
           const prev = s.trail[i - 1];
           const curr = s.trail[i];
-          ctx.strokeStyle = `rgba(0, 240, 255, ${Math.max(0, curr.life * 0.65)})`;
+          ctx.save();
+          ctx.globalAlpha = Math.max(0, curr.life * 0.72);
+          ctx.strokeStyle = skinConfig.accentCss;
           ctx.lineWidth = Math.max(1, curr.life * 5);
           ctx.lineCap = 'round';
           ctx.beginPath();
           ctx.moveTo(prev.x, prev.y);
           ctx.lineTo(curr.x, curr.y);
           ctx.stroke();
+          ctx.restore();
         }
       }
 
@@ -609,7 +621,7 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
 
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [difficulty, finishRound, gameState, spawnTarget]);
+  }, [difficulty, finishRound, gameState, skinConfig.accentCss, spawnTarget]);
 
   const toCanvasCoords = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
@@ -668,7 +680,7 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
       const t = s.targets[i];
       const dx = coords.x - t.x;
       const dy = coords.y - t.y;
-      const hitRadius = t.radius + 14; // generous touch hitbox
+      const hitRadius = t.radius + (hasBladeTempering ? 20 : 14);
       if (dx * dx + dy * dy <= hitRadius * hitRadius) {
         s.targets.splice(i, 1);
 
@@ -700,8 +712,9 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
           t.kind === 'crimson-core' ? 220 : t.kind === 'gold-shard' ? 160 : 100;
         const timingRatio = t.age / t.lifespan;
         const isPerfect = timingRatio >= 0.62;
+        const perkMult = hasChronoBattery ? 1.15 : 1;
         const earned = Math.round(
-          basePoints * (1 + (s.combo - 1) * 0.25) * cfg.multiplier * (isPerfect ? 1.25 : 1)
+          basePoints * (1 + (s.combo - 1) * 0.25) * cfg.multiplier * (isPerfect ? 1.25 : 1) * perkMult
         );
 
         s.score += earned;
@@ -788,8 +801,11 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5" aria-label={`Shields: ${hudShields} of 3`}>
-            {[0, 1, 2].map((idx) => (
+          <div
+            className="flex items-center gap-1.5"
+            aria-label={`Shields: ${hudShields} of ${maxShields}`}
+          >
+            {Array.from({ length: maxShields }, (_, idx) => idx).map((idx) => (
               <Shield
                 key={idx}
                 className={`w-4 h-4 sm:w-5 sm:h-5 transition-colors ${
@@ -836,7 +852,7 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
 
       {/* Title Menu Overlay */}
       {gameState === 'TITLE_MENU' && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#07070F]/85 backdrop-blur-sm p-4">
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#07070F]/88 p-4">
           <div className="w-full max-w-xl rounded-2xl bg-[#120B24]/95 border border-white/10 p-5 sm:p-7 text-center shadow-2xl">
             <div className="text-xs font-medium tracking-wider text-[#00F0FF] uppercase">
               Shadow Knight Game Zone · Reflex Arena
@@ -897,7 +913,7 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
 
       {/* Pause Overlay */}
       {gameState === 'PAUSED' && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#07070F]/80 backdrop-blur-sm p-4">
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#07070F]/86 p-4">
           <div className="w-full max-w-sm rounded-2xl bg-[#120B24] border border-white/10 p-6 text-center shadow-2xl">
             <h3 className="font-display text-xl font-bold text-white">Match Paused</h3>
             <p className="mt-1.5 text-xs text-slate-400">
@@ -934,7 +950,7 @@ export const ShadowReflexArena: React.FC<GameComponentProps> = ({
 
       {/* Game Over Summary & WhatsApp Viral Challenge */}
       {gameState === 'GAME_OVER' && summaryStats && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#07070F]/88 backdrop-blur-md p-4">
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#07070F]/92 p-4">
           <div className="w-full max-w-lg rounded-2xl bg-[#120B24] border border-white/12 p-5 sm:p-6 shadow-2xl">
             <div className="flex items-center justify-between gap-2">
               <div>

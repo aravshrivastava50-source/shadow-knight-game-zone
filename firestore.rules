@@ -130,6 +130,97 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    // Validation Blueprint: PlayerCloudProfile
+    function isValidPlayerProfile(data) {
+      return data.keys().hasAll([
+          'uid',
+          'gamerTag',
+          'xp',
+          'coins',
+          'streak',
+          'lastActiveDate',
+          'gamesPlayed',
+          'highScores',
+          'preRegisteredIds',
+          'equippedSkin',
+          'unlockedSkins',
+          'unlockedPerks',
+          'soundMuted',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'gamerTag',
+          'xp',
+          'coins',
+          'streak',
+          'lastActiveDate',
+          'gamesPlayed',
+          'highScores',
+          'preRegisteredIds',
+          'equippedSkin',
+          'unlockedSkins',
+          'unlockedPerks',
+          'soundMuted',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.gamerTag is string && data.gamerTag.size() >= 1 && data.gamerTag.size() <= 18
+        && data.xp is number && data.xp >= 0 && data.xp <= 100000000
+        && data.coins is number && data.coins >= 0 && data.coins <= 100000000
+        && data.streak is number && data.streak >= 1 && data.streak <= 36500
+        && data.lastActiveDate is string && data.lastActiveDate.size() >= 8 && data.lastActiveDate.size() <= 12
+        && data.gamesPlayed is number && data.gamesPlayed >= 0 && data.gamesPlayed <= 1000000
+        && data.highScores is map && data.highScores.size() <= 50
+        && data.preRegisteredIds is list && data.preRegisteredIds.size() <= 50
+        && (data.preRegisteredIds.size() == 0 || (data.preRegisteredIds[0] is string && data.preRegisteredIds[0].size() <= 64))
+        && data.equippedSkin in ['cyber-cyan', 'crimson-hellfire', 'solar-gold', 'void-amethyst']
+        && data.unlockedSkins is list && data.unlockedSkins.size() >= 1 && data.unlockedSkins.size() <= 10
+        && data.unlockedSkins[0] is string && data.unlockedSkins[0].size() <= 32
+        && data.unlockedPerks is list && data.unlockedPerks.size() <= 10
+        && (data.unlockedPerks.size() == 0 || (data.unlockedPerks[0] is string && data.unlockedPerks[0].size() <= 32))
+        && data.soundMuted is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: GlobalLeaderboardEntry
+    function isValidLeaderboardEntry(data) {
+      return data.keys().hasAll([
+          'id',
+          'uid',
+          'gamerTag',
+          'gameId',
+          'gameTitle',
+          'score',
+          'maxCombo',
+          'accuracy',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'uid',
+          'gamerTag',
+          'gameId',
+          'gameTitle',
+          'score',
+          'maxCombo',
+          'accuracy',
+          'createdAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.uid)
+        && data.gamerTag is string && data.gamerTag.size() >= 1 && data.gamerTag.size() <= 18
+        && isValidId(data.gameId) && data.gameId.size() <= 64
+        && data.gameTitle is string && data.gameTitle.size() >= 2 && data.gameTitle.size() <= 80
+        && data.score is number && data.score >= 0 && data.score <= 10000000
+        && data.maxCombo is number && data.maxCombo >= 1 && data.maxCombo <= 9999
+        && data.accuracy is number && data.accuracy >= 0 && data.accuracy <= 100
+        && data.createdAt is timestamp;
+    }
+
     // Collection: /published_games/{gameId}
     match /published_games/{gameId} {
       allow get: if isValidId(gameId) && (
@@ -201,6 +292,60 @@ service cloud.firestore {
         ]);
 
       allow delete: if false;
+    }
+
+    // Collection: /players/{uid}
+    match /players/{uid} {
+      allow get: if isVerifiedUser() && isValidId(uid) && (request.auth.uid == uid || isAdmin());
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidId(uid)
+        && request.auth.uid == uid
+        && isValidPlayerProfile(incoming())
+        && incoming().uid == uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(uid)
+        && (request.auth.uid == uid || isAdmin())
+        && isValidPlayerProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'gamerTag',
+          'xp',
+          'coins',
+          'streak',
+          'lastActiveDate',
+          'gamesPlayed',
+          'highScores',
+          'preRegisteredIds',
+          'equippedSkin',
+          'unlockedSkins',
+          'unlockedPerks',
+          'soundMuted',
+          'updatedAt'
+        ]);
+
+      allow delete: if isAdmin() && isValidId(uid);
+    }
+
+    // Collection: /leaderboard/{entryId}
+    match /leaderboard/{entryId} {
+      allow get: if isValidId(entryId) && existing().score >= 0;
+      allow list: if resource.data.score >= 0;
+
+      allow create: if isVerifiedUser()
+        && isValidId(entryId)
+        && isValidLeaderboardEntry(incoming())
+        && incoming().id == entryId
+        && incoming().uid == request.auth.uid
+        && incoming().createdAt == request.time;
+
+      allow update, delete: if isAdmin() && isValidId(entryId);
     }
 
     // Collection: /admins/{uid}

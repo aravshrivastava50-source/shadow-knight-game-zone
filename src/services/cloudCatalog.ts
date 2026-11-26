@@ -240,6 +240,22 @@ export function mergeCatalogWithBuiltIn(
   return [...builtInGames, ...uniqueCloudGames];
 }
 
+function isTransientConnectionError(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  if (code === 'unavailable' || code === 'deadline-exceeded') {
+    return true;
+  }
+  if (error instanceof Error) {
+    const msg = error.message.toLowerCase();
+    return (
+      msg.includes('unavailable') ||
+      msg.includes('client is offline') ||
+      msg.includes('could not reach cloud firestore backend')
+    );
+  }
+  return false;
+}
+
 export function subscribeToPublishedGames(
   onUpdate: (games: GameMetadata[]) => void
 ): () => void {
@@ -256,98 +272,122 @@ export function subscribeToPublishedGames(
   );
 
   let active = true;
+  let unsubscribeSnapshot: (() => void) | null = null;
+  let onlineListener: (() => void) | null = null;
 
-  const unsubscribe = onSnapshot(
-    gamesQuery,
-    async (snapshot) => {
-      try {
-        const resolvedDocs = await Promise.all(
-          snapshot.docs.map(async (snap) => {
-            const data = snap.data() as Record<string, unknown>;
-            const id =
-              typeof data.id === 'string' && /^[a-zA-Z0-9_\-]+$/.test(data.id)
-                ? data.id
-                : snap.id;
-            const title =
-              typeof data.title === 'string' ? data.title.trim().slice(0, 80) : '';
-            const creatorStudio =
-              typeof data.creatorStudio === 'string'
-                ? data.creatorStudio.trim().slice(0, 80)
-                : 'Verified Creator';
-            const category = VALID_CATEGORIES.has(data.category as PublishedGameDoc['category'])
-              ? (data.category as PublishedGameDoc['category'])
-              : 'Arcade & Reflex';
+  const startListener = () => {
+    if (!active || unsubscribeSnapshot) return;
 
-            const legalRightsVerified = data.legalRightsVerified === true;
-            if (!title || !legalRightsVerified) return null;
+    unsubscribeSnapshot = onSnapshot(
+      gamesQuery,
+      async (snapshot) => {
+        try {
+          const resolvedDocs = await Promise.all(
+            snapshot.docs.map(async (snap) => {
+              const data = snap.data() as Record<string, unknown>;
+              const id =
+                typeof data.id === 'string' && /^[a-zA-Z0-9_\-]+$/.test(data.id)
+                  ? data.id
+                  : snap.id;
+              const title =
+                typeof data.title === 'string' ? data.title.trim().slice(0, 80) : '';
+              const creatorStudio =
+                typeof data.creatorStudio === 'string'
+                  ? data.creatorStudio.trim().slice(0, 80)
+                  : 'Verified Creator';
+              const category = VALID_CATEGORIES.has(data.category as PublishedGameDoc['category'])
+                ? (data.category as PublishedGameDoc['category'])
+                : 'Arcade & Reflex';
 
-            const [bundleUrl, thumbUrl] = await Promise.all([
-              resolveCloudStorageOrHttpsUrl(data.gameBundleUrl),
-              resolveCloudStorageOrHttpsUrl(data.thumbnailUrl),
-            ]);
+              const legalRightsVerified = data.legalRightsVerified === true;
+              if (!title || !legalRightsVerified) return null;
 
-            if (!bundleUrl) return null;
+              const [bundleUrl, thumbUrl] = await Promise.all([
+                resolveCloudStorageOrHttpsUrl(data.gameBundleUrl),
+                resolveCloudStorageOrHttpsUrl(data.thumbnailUrl),
+              ]);
 
-            const normalizedDoc: PublishedGameDoc = {
-              id,
-              title,
-              creatorStudio,
-              category,
-              subtitle:
-                typeof data.subtitle === 'string' ? data.subtitle.trim().slice(0, 100) : undefined,
-              description:
-                typeof data.description === 'string'
-                  ? data.description.trim().slice(0, 500)
-                  : undefined,
-              thumbnailUrl: thumbUrl || '',
-              gameBundleUrl: bundleUrl,
-              isLandscapeOnly: data.isLandscapeOnly !== false,
-              legalRightsVerified: true,
-              accentColor: data.accentColor === 'crimson' ? 'crimson' : 'cyan',
-              rating: typeof data.rating === 'number' ? data.rating : 4.8,
-              activePlayersLabel:
-                typeof data.activePlayersLabel === 'string'
-                  ? data.activePlayersLabel.trim().slice(0, 40)
-                  : undefined,
-              xpRewardMultiplier:
-                typeof data.xpRewardMultiplier === 'number' ? data.xpRewardMultiplier : 1.5,
-              createdAt: normalizeTimestamp(data.createdAt),
-            };
+              if (!bundleUrl) return null;
 
-            return normalizedDoc;
-          })
-        );
+              const normalizedDoc: PublishedGameDoc = {
+                id,
+                title,
+                creatorStudio,
+                category,
+                subtitle:
+                  typeof data.subtitle === 'string' ? data.subtitle.trim().slice(0, 100) : undefined,
+                description:
+                  typeof data.description === 'string'
+                    ? data.description.trim().slice(0, 500)
+                    : undefined,
+                thumbnailUrl: thumbUrl || '',
+                gameBundleUrl: bundleUrl,
+                isLandscapeOnly: data.isLandscapeOnly !== false,
+                legalRightsVerified: true,
+                accentColor: data.accentColor === 'crimson' ? 'crimson' : 'cyan',
+                rating: typeof data.rating === 'number' ? data.rating : 4.8,
+                activePlayersLabel:
+                  typeof data.activePlayersLabel === 'string'
+                    ? data.activePlayersLabel.trim().slice(0, 40)
+                    : undefined,
+                xpRewardMultiplier:
+                  typeof data.xpRewardMultiplier === 'number' ? data.xpRewardMultiplier : 1.5,
+                createdAt: normalizeTimestamp(data.createdAt),
+              };
 
-        if (!active) return;
+              return normalizedDoc;
+            })
+          );
 
-        const validDocs = resolvedDocs
-          .filter((item): item is PublishedGameDoc => item !== null)
-          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+          if (!active) return;
 
-        saveCachedCloudGames(validDocs);
-        onUpdate(validDocs.map(toCloudGameMetadata));
-      } catch (error) {
-        console.warn('Cloud game resolution fallback to local cache:', error);
+          const validDocs = resolvedDocs
+            .filter((item): item is PublishedGameDoc => item !== null)
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+          saveCachedCloudGames(validDocs);
+          onUpdate(validDocs.map(toCloudGameMetadata));
+        } catch (error) {
+          console.warn('Cloud game resolution fallback to local cache:', error);
+          if (active) {
+            onUpdate(loadCachedCloudGames());
+          }
+        }
+      },
+      (error) => {
+        if (!isTransientConnectionError(error)) {
+          try {
+            handleFirestoreError(error, OperationType.LIST, publishedPath);
+          } catch {
+            // Fall through to localStorage fallback below
+          }
+        }
         if (active) {
           onUpdate(loadCachedCloudGames());
         }
       }
-    },
-    (error) => {
-      try {
-        handleFirestoreError(error, OperationType.LIST, publishedPath);
-      } catch {
-        // Seamless localStorage fallback if offline or rules deny unpopulated path
-        if (active) {
-          onUpdate(loadCachedCloudGames());
-        }
-      }
-    }
-  );
+    );
+  };
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine && typeof window !== 'undefined') {
+    onlineListener = () => {
+      startListener();
+    };
+    window.addEventListener('online', onlineListener, { once: true });
+  } else {
+    startListener();
+  }
 
   return () => {
     active = false;
-    unsubscribe();
+    if (onlineListener && typeof window !== 'undefined') {
+      window.removeEventListener('online', onlineListener);
+      onlineListener = null;
+    }
+    if (unsubscribeSnapshot) {
+      unsubscribeSnapshot();
+      unsubscribeSnapshot = null;
+    }
   };
 }
 
@@ -359,27 +399,58 @@ export function subscribeToPortalSettings(
   const configPath = 'portal_settings/config';
   const configRef = doc(db, 'portal_settings', 'config');
 
-  const unsubscribe = onSnapshot(
-    configRef,
-    (snapshot) => {
-      if (!snapshot.exists()) {
-        return;
-      }
-      const normalized = normalizePortalSettings(snapshot.data() as Record<string, unknown>);
-      saveCachedPortalSettings(normalized);
-      onUpdate(normalized);
-    },
-    (error) => {
-      try {
-        handleFirestoreError(error, OperationType.GET, configPath);
-      } catch {
-        // Seamless localStorage / default fallback if offline or unconfigured
-        onUpdate(loadCachedPortalSettings());
-      }
-    }
-  );
+  let active = true;
+  let unsubscribeSnapshot: (() => void) | null = null;
+  let onlineListener: (() => void) | null = null;
 
-  return unsubscribe;
+  const startListener = () => {
+    if (!active || unsubscribeSnapshot) return;
+
+    unsubscribeSnapshot = onSnapshot(
+      configRef,
+      (snapshot) => {
+        if (!snapshot.exists()) {
+          return;
+        }
+        const normalized = normalizePortalSettings(snapshot.data() as Record<string, unknown>);
+        saveCachedPortalSettings(normalized);
+        onUpdate(normalized);
+      },
+      (error) => {
+        if (!isTransientConnectionError(error)) {
+          try {
+            handleFirestoreError(error, OperationType.GET, configPath);
+          } catch {
+            // Fall through to localStorage fallback below
+          }
+        }
+        if (active) {
+          onUpdate(loadCachedPortalSettings());
+        }
+      }
+    );
+  };
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine && typeof window !== 'undefined') {
+    onlineListener = () => {
+      startListener();
+    };
+    window.addEventListener('online', onlineListener, { once: true });
+  } else {
+    startListener();
+  }
+
+  return () => {
+    active = false;
+    if (onlineListener && typeof window !== 'undefined') {
+      window.removeEventListener('online', onlineListener);
+      onlineListener = null;
+    }
+    if (unsubscribeSnapshot) {
+      unsubscribeSnapshot();
+      unsubscribeSnapshot = null;
+    }
+  };
 }
 
 export { DEFAULT_PORTAL_SETTINGS };
